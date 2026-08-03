@@ -141,8 +141,11 @@ SIMPLE_JWT = {
 REDIS_URL = env("REDIS_URL")
 
 CHANNEL_LAYERS = {
+    # The pubsub layer, not channels_redis.core: the core layer parks on a
+    # BRPOP that redis-py 8 aborts on its socket timeout, which drops idle
+    # device sockets with a 1011 after a few seconds.
     "default": {
-        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "BACKEND": "channels_redis.pubsub.RedisPubSubChannelLayer",
         "CONFIG": {"hosts": [REDIS_URL]},
     }
 }

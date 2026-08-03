@@ -178,6 +178,9 @@ Commands that go unanswered for `COMMAND_TIMEOUT_SECONDS` are closed out by
   `ab@gmail.com` cannot become two accounts. Codes are stored as SHA-256, are
   single-use, expire in 10 minutes and allow 5 attempts.
 - Email is on the console backend; point `EMAIL_BACKEND` at SMTP when ready.
+- The channel layer is `channels_redis.pubsub`, not `channels_redis.core`. The
+  core layer parks on a `BRPOP` that redis-py 8 aborts on its socket timeout,
+  which drops idle device sockets with a 1011 after a few seconds.
 
 ## Still to do
 
