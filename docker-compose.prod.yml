@@ -1,0 +1,71 @@
+# Full stack, for a server. Reads its configuration from a .env file next to
+# this one (see iothome/.env.example for the keys).
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Put a TLS terminator (nginx, Caddy, or your cloud load balancer) in front of
+# `web` and proxy both HTTP and the WebSocket upgrade to port 8000.
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-iothome}
+      POSTGRES_USER: ${POSTGRES_USER:-iothome}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-iothome}"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+  web:
+    build: .
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    env_file: .env
+    command: celery -A iothome worker -l info --concurrency 4
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  beat:
+    build: .
+    env_file: .env
+    command: celery -A iothome beat -l info
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  postgres-data:

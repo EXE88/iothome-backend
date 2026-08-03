@@ -1,0 +1,48 @@
+# Development services. Django itself stays on the host so you keep the
+# debugger and fast reloads; only the things that are painful to install on
+# Windows run in containers.
+#
+#   docker compose up -d          start Redis + Postgres
+#   docker compose logs -f redis  watch one of them
+#   docker compose down           stop (data survives in the volumes)
+#   docker compose down -v        stop and wipe the data
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: iothome-redis
+    ports:
+      - "6379:6379"
+    # Presence data is rebuildable, but AOF keeps a restart from looking like
+    # every device went offline at once.
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: iothome-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: iothome
+      POSTGRES_USER: iothome
+      POSTGRES_PASSWORD: iothome-dev-password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iothome"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  postgres-data:
