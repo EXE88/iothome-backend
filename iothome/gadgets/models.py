@@ -241,52 +241,13 @@ class Gadget(models.Model):
         self.save(update_fields=fields)
 
 
-class TelemetryReading(models.Model):
-    """Historical series of everything a device has reported."""
-
-    gadget = models.ForeignKey(
-        Gadget, on_delete=models.CASCADE, related_name="readings"
-    )
-    key = models.SlugField(max_length=48)
-    value_number = models.FloatField(null=True, blank=True)
-    value_bool = models.BooleanField(null=True, blank=True)
-    value_text = models.CharField(max_length=255, blank=True)
-    recorded_at = models.DateTimeField(default=timezone.now)
-
-    class Meta:
-        ordering = ("-recorded_at",)
-        indexes = [models.Index(fields=["gadget", "key", "-recorded_at"])]
-
-    def __str__(self):
-        return f"{self.gadget_id}.{self.key}={self.value}"
-
-    @property
-    def value(self):
-        if self.value_bool is not None:
-            return self.value_bool
-        if self.value_number is not None:
-            return self.value_number
-        return self.value_text
-
-    @classmethod
-    def store(cls, gadget, key, value, recorded_at=None):
-        kwargs = {"value_number": None, "value_bool": None, "value_text": ""}
-        if isinstance(value, bool):
-            kwargs["value_bool"] = value
-        elif isinstance(value, (int, float)):
-            kwargs["value_number"] = float(value)
-        else:
-            kwargs["value_text"] = str(value)[:255]
-        return cls.objects.create(
-            gadget=gadget,
-            key=key,
-            recorded_at=recorded_at or timezone.now(),
-            **kwargs,
-        )
-
-
 class Command(models.Model):
-    """One user-issued command and whatever the device answered."""
+    """One user-issued command and whatever the device answered.
+
+    This is the only history the system keeps. Commands are human-initiated,
+    so the volume is small, and the audit trail is what answers "who turned
+    this on" later. Streamed telemetry is relayed live and never stored.
+    """
 
     STATUS_PENDING = "pending"
     STATUS_SENT = "sent"

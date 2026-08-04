@@ -23,7 +23,7 @@ from rest_framework_simplejwt.tokens import AccessToken
 from core import redis_client
 
 from .consumers import DeviceConsumer, UserConsumer, canonical
-from .models import Capability, Command, Gadget, GadgetType, TelemetryReading
+from .models import Capability, Command, Gadget, GadgetType
 from .presence import user_group
 from .tests import make_catalog
 
@@ -207,7 +207,7 @@ class DeviceHandshakeTests(ConsumerTestCase):
 
 
 class TelemetryTests(ConsumerTestCase):
-    async def test_valid_reading_is_stored_and_forwarded(self):
+    async def test_valid_reading_is_forwarded_but_not_stored(self):
         user, _token = await self.connect_user()
         await user.receive_json_from()  # auth.ok
         device = await self.connect_device()
@@ -221,13 +221,21 @@ class TelemetryTests(ConsumerTestCase):
         self.assertEqual(pushed["type"], "telemetry")
         self.assertEqual(pushed["readings"]["temperature"], 23.5)
 
-        stored = await database_sync_to_async(list)(
-            TelemetryReading.objects.filter(gadget=self.gadget)
-        )
-        self.assertEqual(len(stored), 1)
-        self.assertEqual(stored[0].value, 23.5)
+        # Relayed live and gone: the only history the system keeps is commands.
+        self.assertEqual(await database_sync_to_async(Command.objects.count)(), 0)
         await device.disconnect()
         await user.disconnect()
+
+    async def test_reading_with_no_listener_is_dropped_silently(self):
+        device = await self.connect_device()
+        await device.receive_json_from()
+        # Nobody is watching; the device must not get an error for it.
+        await device.send_json_to(
+            {"type": "telemetry", "readings": {"temperature": 21.0}}
+        )
+        await device.send_json_to({"type": "heartbeat"})
+        self.assertEqual((await device.receive_json_from())["type"], "pong")
+        await device.disconnect()
 
     async def test_out_of_range_reading_is_refused(self):
         device = await self.connect_device()
@@ -237,9 +245,6 @@ class TelemetryTests(ConsumerTestCase):
         )
         reply = await device.receive_json_from()
         self.assertEqual(reply["code"], "invalid_value")
-        self.assertEqual(
-            await database_sync_to_async(TelemetryReading.objects.count)(), 0
-        )
         await device.disconnect()
 
     async def test_unknown_key_is_refused(self):
@@ -305,6 +310,92 @@ class UserHandshakeTests(ConsumerTestCase):
         self.assertEqual((await user.receive_json_from())["code"], "auth_failed")
         await user.disconnect()
 
+    async def test_connecting_asks_online_gadgets_for_their_state(self):
+        device = await self.connect_device()
+        await device.receive_json_from()  # auth.ok
+
+        user, _token = await self.connect_user()
+        await user.receive_json_from()  # auth.ok
+
+        # The device is polled, answers like any telemetry frame, and the
+        # answer lands on the dashboard that asked for it.
+        asked = await device.receive_json_from()
+        self.assertEqual(asked["type"], "state_request")
+
+        await device.send_json_to(
+            {"type": "telemetry", "readings": {"temperature": 21.5}}
+        )
+        pushed = await user.receive_json_from()
+        self.assertEqual(pushed["type"], "telemetry")
+        self.assertEqual(pushed["readings"]["temperature"], 21.5)
+
+        await device.disconnect()
+        await user.disconnect()
+
+    @override_settings(STATE_REQUEST_TIMEOUT_SECONDS=1)
+    async def test_silent_gadget_is_reported_as_state_unknown(self):
+        device = await self.connect_device()
+        await device.receive_json_from()  # auth.ok
+
+        user, _token = await self.connect_user()
+        await user.receive_json_from()  # auth.ok
+        await device.receive_json_from()  # state_request, deliberately ignored
+
+        unknown = await user.receive_json_from(timeout=4)
+        self.assertEqual(unknown["type"], "state.unknown")
+        self.assertEqual(unknown["gadget"], self.uid)
+        # The socket stays up: not answering a poll is not the same as dying.
+        await device.send_json_to({"type": "heartbeat"})
+        self.assertEqual((await device.receive_json_from())["type"], "pong")
+        await device.disconnect()
+        await user.disconnect()
+
+    @override_settings(STATE_REQUEST_TIMEOUT_SECONDS=1)
+    async def test_answering_the_poll_suppresses_state_unknown(self):
+        device = await self.connect_device()
+        await device.receive_json_from()
+        user, _token = await self.connect_user()
+        await user.receive_json_from()
+        await device.receive_json_from()  # state_request
+
+        await device.send_json_to(
+            {"type": "telemetry", "readings": {"temperature": 19.0}}
+        )
+        self.assertEqual((await user.receive_json_from())["type"], "telemetry")
+        # Nothing further once the poll has been satisfied.
+        self.assertTrue(await user.receive_nothing(timeout=3))
+        await device.disconnect()
+        await user.disconnect()
+
+    async def test_gadget_coming_online_later_is_polled_too(self):
+        user, _token = await self.connect_user()
+        await user.receive_json_from()  # auth.ok, nothing online yet
+
+        device = await self.connect_device()
+        await device.receive_json_from()  # auth.ok
+
+        status = await user.receive_json_from()
+        self.assertEqual(status["type"], "device.status")
+        self.assertTrue(status["online"])
+
+        asked = await device.receive_json_from()
+        self.assertEqual(asked["type"], "state_request")
+        await device.send_json_to(
+            {"type": "telemetry", "readings": {"temperature": 25.0}}
+        )
+        pushed = await user.receive_json_from()
+        self.assertEqual(pushed["readings"]["temperature"], 25.0)
+        await device.disconnect()
+        await user.disconnect()
+
+    async def test_offline_gadget_is_not_polled(self):
+        user, _token = await self.connect_user()
+        reply = await user.receive_json_from()
+        self.assertFalse(reply["gadgets"][0]["online"])
+        # No device socket exists; nothing should arrive on this one either.
+        self.assertTrue(await user.receive_nothing())
+        await user.disconnect()
+
     async def test_online_gadget_is_reported_on_connect(self):
         device = await self.connect_device()
         await device.receive_json_from()
@@ -315,7 +406,92 @@ class UserHandshakeTests(ConsumerTestCase):
         await user.disconnect()
 
 
+class RefreshStateTests(ConsumerTestCase):
+    async def setup_pair(self):
+        device = await self.connect_device()
+        await device.receive_json_from()  # auth.ok
+        user, token = await self.connect_user()
+        await user.receive_json_from()  # auth.ok
+        await device.receive_json_from()  # the automatic poll on connect
+        return device, user
+
+    async def test_refresh_polls_the_gadget_again(self):
+        device, user = await self.setup_pair()
+
+        await user.send_json_to({"type": "refresh_state"})
+        ack = await user.receive_json_from()
+        self.assertEqual(ack["type"], "refresh.ack")
+        self.assertEqual(ack["polled"], [self.uid])
+        self.assertEqual(ack["skipped_offline"], [])
+
+        asked = await device.receive_json_from()
+        self.assertEqual(asked["type"], "state_request")
+        await device.send_json_to(
+            {"type": "telemetry", "readings": {"temperature": 30.0}}
+        )
+        pushed = await user.receive_json_from()
+        self.assertEqual(pushed["readings"]["temperature"], 30.0)
+        await device.disconnect()
+        await user.disconnect()
+
+    async def test_offline_gadget_is_reported_not_polled(self):
+        user, _token = await self.connect_user()
+        await user.receive_json_from()
+        await user.send_json_to({"type": "refresh_state"})
+        ack = await user.receive_json_from()
+        self.assertEqual(ack["polled"], [])
+        self.assertEqual(ack["skipped_offline"], [self.uid])
+        await user.disconnect()
+
+    async def test_rapid_second_refresh_is_refused(self):
+        device, user = await self.setup_pair()
+        await user.send_json_to({"type": "refresh_state"})
+        await user.receive_json_from()  # ack
+        await device.receive_json_from()  # state_request
+
+        await user.send_json_to({"type": "refresh_state"})
+        reply = await user.receive_json_from()
+        self.assertEqual(reply["code"], "refresh_too_soon")
+        await device.disconnect()
+        await user.disconnect()
+
+    @override_settings(STATE_REFRESH_MIN_INTERVAL_SECONDS=0)
+    async def test_someone_elses_gadget_is_ignored(self):
+        stranger = await database_sync_to_async(User.objects.create_user)(
+            email="stranger@gmail.com", password="pass-12345", is_email_verified=True
+        )
+        other = await database_sync_to_async(Gadget.objects.create)(
+            owner=stranger, product=self.product, gadget_type=self.gadget_type
+        )
+        _device, user = await self.setup_pair()
+
+        await user.send_json_to(
+            {"type": "refresh_state", "gadgets": [str(other.uid)]}
+        )
+        ack = await user.receive_json_from()
+        self.assertEqual(ack["polled"], [])
+        self.assertEqual(ack["skipped_offline"], [])
+        await user.disconnect()
+
+    @override_settings(STATE_REFRESH_MIN_INTERVAL_SECONDS=0)
+    async def test_explicit_subset_only_polls_that_gadget(self):
+        device, user = await self.setup_pair()
+        await user.send_json_to(
+            {"type": "refresh_state", "gadgets": [self.uid, "not-a-gadget"]}
+        )
+        ack = await user.receive_json_from()
+        self.assertEqual(ack["polled"], [self.uid])
+        self.assertEqual((await device.receive_json_from())["type"], "state_request")
+        await device.disconnect()
+        await user.disconnect()
+
+
 class CommandTests(ConsumerTestCase):
+    async def drain_state_request(self, device):
+        """A user connecting polls every online gadget; skip that frame."""
+        frame = await device.receive_json_from()
+        assert frame["type"] == "state_request", frame
+
     async def issue(self, user, token, key, value, gadget_uid=None, request_id=None):
         request_id = request_id or secrets.token_hex(16)
         gadget_uid = gadget_uid or self.uid
@@ -342,6 +518,7 @@ class CommandTests(ConsumerTestCase):
         await device.receive_json_from()
         user, token = await self.connect_user()
         await user.receive_json_from()
+        await self.drain_state_request(device)
 
         with mock.patch("gadgets.tasks.expire_command.apply_async"):
             request_id = await self.issue(user, token, "power", True)
@@ -374,6 +551,7 @@ class CommandTests(ConsumerTestCase):
         await device.receive_json_from()
         user, token = await self.connect_user()
         await user.receive_json_from()
+        await self.drain_state_request(device)
 
         await self.issue(user, token, "brightness", 500)
         self.assertEqual((await user.receive_json_from())["code"], "invalid_value")

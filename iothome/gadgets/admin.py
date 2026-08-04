@@ -1,7 +1,7 @@
 from django.contrib import admin
 
 from . import presence
-from .models import Capability, Command, Gadget, GadgetType, TelemetryReading
+from .models import Capability, Command, Gadget, GadgetType
 
 
 class CapabilityInline(admin.TabularInline):
@@ -28,14 +28,6 @@ class GadgetAdmin(admin.ModelAdmin):
     @admin.display(boolean=True, description="Online")
     def online(self, obj):
         return presence.is_online(obj.uid)
-
-
-@admin.register(TelemetryReading)
-class TelemetryReadingAdmin(admin.ModelAdmin):
-    list_display = ("gadget", "key", "value", "recorded_at")
-    list_filter = ("key",)
-    raw_id_fields = ("gadget",)
-    date_hierarchy = "recorded_at"
 
 
 @admin.register(Command)

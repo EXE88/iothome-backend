@@ -10,7 +10,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from . import presence, protocol
-from .models import Command, Gadget, TelemetryReading
+from .models import Command, Gadget
 
 logger = logging.getLogger("iothome.tasks")
 
@@ -106,12 +106,16 @@ def expire_stale_commands():
 
 
 @shared_task
-def prune_old_telemetry(days=90):
-    """Keep the readings table from growing without bound."""
+def prune_old_commands(days=90):
+    """Drop command history past the retention window.
+
+    Commands accumulate slowly — one row per button press — but the audit
+    trail still needs a horizon.
+    """
     cutoff = timezone.now() - timedelta(days=days)
-    deleted, _ = TelemetryReading.objects.filter(recorded_at__lt=cutoff).delete()
+    deleted, _ = Command.objects.filter(created_at__lt=cutoff).delete()
     if deleted:
-        logger.info("pruned %s telemetry rows older than %s days", deleted, days)
+        logger.info("pruned %s command rows older than %s days", deleted, days)
     return deleted
 
 

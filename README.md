@@ -131,10 +131,10 @@ above `WS_MAX_FRAMES_PER_MINUTE`.
 ## Message types
 
 Device → server: `auth`, `heartbeat`, `telemetry`, `command_result`.
-Server → device: `auth.ok`, `command`, `error`.
-User → server: `auth`, `command`, `heartbeat`.
+Server → device: `auth.ok`, `command`, `state_request`, `error`.
+User → server: `auth`, `command`, `refresh_state`, `heartbeat`.
 Server → user: `auth.ok`, `telemetry`, `device.status`, `command.status`,
-`pong`, `error`.
+`state.unknown`, `refresh.ack`, `pong`, `error`.
 
 `auth.ok` for a device includes its capability contract; `auth.ok` for a user
 includes every gadget it owns with a live `online` flag. Full payload shapes
@@ -166,6 +166,50 @@ carries its own TTL, so a worker dying mid-connection cannot leave a ghost.
 Commands that go unanswered for `COMMAND_TIMEOUT_SECONDS` are closed out by
 `expire_command`, with `expire_stale_commands` as the backstop.
 
+## What gets stored, and what does not
+
+**Commands are stored** — the command, who issued it, and the device's answer.
+They are human-initiated, so the volume is small, and this is the trail that
+answers "who turned this on" later. `prune_old_commands` drops them after 90
+days.
+
+**Telemetry is not stored.** A reading is validated against the gadget type's
+capabilities and relayed to the owner's socket; if no socket is open it is
+dropped. Nothing is written to disk. A thermometer reporting every few seconds
+would otherwise fill the database with values nobody reads back, and the write
+would sit in the path between the device and the dashboard.
+
+**State is pulled, not cached.** When a user's socket finishes its handshake,
+the server sends `state_request` to each of that user's *online* gadgets, and
+each answers with an ordinary telemetry frame that lands on the dashboard a
+moment later. A gadget that comes online while the dashboard is already open
+gets polled the same way — that request is issued by the user's own consumer
+when it sees the `device.status` event, so if nobody is watching, nothing is
+sent and no user-presence bookkeeping is needed. Firmware keeps its own state
+across the connection and speaks only when asked.
+
+If a polled gadget stays silent for `STATE_REQUEST_TIMEOUT_SECONDS`, the
+dashboard gets `state.unknown` for it and can show "online, state unknown"
+instead of waiting forever. The connection is left alone: failing to answer a
+poll is not evidence of death, and liveness is the heartbeat's job. Any later
+reading — solicited or not — clears the flag.
+
+A user can re-poll at will by sending `refresh_state` (a refresh button, for
+the gadgets that came back unknown). With no `gadgets` list it covers
+everything they own; the reply is `refresh.ack` with what was polled and what
+was skipped as offline. It is unsigned — it reads, it changes nothing on the
+hardware — but rate-limited by `STATE_REFRESH_MIN_INTERVAL_SECONDS`, since one
+frame fans out to every gadget on the account.
+
+This is why there is no server-side "last known value" anywhere: nothing to go
+stale, nothing lost if Redis restarts, no write on the telemetry path, and no
+unsolicited burst from a device that connects hours before anyone looks at it.
+Offline gadgets simply do not answer, which is the right thing for the UI to
+show for them.
+
+Firmware must implement `state_request` — a device that ignores it will look
+blank on a freshly opened dashboard until its next telemetry frame.
+
 ## Notes
 
 - Device secret keys and Wi-Fi passwords are Fernet-encrypted at rest
@@ -186,5 +230,4 @@ Commands that go unanswered for `COMMAND_TIMEOUT_SECONDS` are closed out by
 
 - Swap SQLite for Postgres (`DATABASE_URL`) before any real traffic.
 - Blacklist refresh tokens on logout (`simplejwt.token_blacklist`).
-- Down-sample telemetry instead of only pruning at 90 days.
 - Serve behind TLS: `wss://` and a `Secure` cookie posture.

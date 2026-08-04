@@ -77,6 +77,22 @@ class Command(BaseCommand):
             raise SystemExit(f"handshake refused: {reply}")
         self.stdout.write(self.style.SUCCESS("authenticated"))
         self.capabilities = reply.get("capabilities", {})
+        # Real firmware boots with a known state and keeps it across the
+        # connection; nothing is sent until someone asks.
+        self.state = {
+            key: self.default_for(spec)
+            for key, spec in self.capabilities.get("telemetry", {}).items()
+        }
+
+    def default_for(self, spec):
+        if spec["value_type"] == "bool":
+            return False
+        if spec["value_type"] in ("int", "float"):
+            low = spec["min"] if spec["min"] is not None else 0
+            return int(low) if spec["value_type"] == "int" else float(low)
+        if spec["value_type"] == "enum" and spec["choices"]:
+            return spec["choices"][0]
+        return ""
 
     async def heartbeat_loop(self, socket, interval):
         while True:
@@ -98,6 +114,7 @@ class Command(BaseCommand):
                 elif spec["value_type"] == "bool":
                     readings[key] = random.choice([True, False])
             if readings:
+                self.state.update(readings)
                 await socket.send(
                     json.dumps({"type": "telemetry", "readings": readings})
                 )
@@ -123,6 +140,7 @@ class Command(BaseCommand):
                 # Echo the new state only for keys the type also reports as
                 # telemetry — anything else would be rejected as unknown.
                 if message["key"] in self.capabilities.get("telemetry", {}):
+                    self.state[message["key"]] = message["value"]
                     await socket.send(
                         json.dumps(
                             {
@@ -130,6 +148,13 @@ class Command(BaseCommand):
                                 "readings": {message["key"]: message["value"]},
                             }
                         )
+                    )
+            elif kind == "state_request":
+                # An owner opened a dashboard. Report where we stand.
+                self.stdout.write(f"<- state_request, replying {self.state}")
+                if self.state:
+                    await socket.send(
+                        json.dumps({"type": "telemetry", "readings": self.state})
                     )
             elif kind == "error":
                 self.stdout.write(self.style.ERROR(f"<- error {message}"))

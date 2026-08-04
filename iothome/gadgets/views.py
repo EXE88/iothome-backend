@@ -1,7 +1,5 @@
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
-from django.db.models import Max
-from django.utils.dateparse import parse_datetime
 from rest_framework import generics, status
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
@@ -10,13 +8,12 @@ from rest_framework.views import APIView
 from core.permissions import IsEmailVerified
 
 from . import presence, protocol
-from .models import Command, Gadget, GadgetType, TelemetryReading
+from .models import Command, Gadget, GadgetType
 from .serializers import (
     CommandSerializer,
     GadgetSerializer,
     GadgetTypeSerializer,
     ProvisioningSerializer,
-    TelemetryReadingSerializer,
 )
 
 
@@ -59,50 +56,6 @@ class GadgetDetailView(OwnedGadgetMixin, generics.RetrieveUpdateAPIView):
         context = super().get_serializer_context()
         context["online_uids"] = presence.online_uids([str(self.kwargs["uid"])])
         return context
-
-
-class GadgetReadingsView(OwnedGadgetMixin, generics.ListAPIView):
-    """History for one gadget: ``?key=temperature&since=<iso8601>``."""
-
-    serializer_class = TelemetryReadingSerializer
-
-    def get_queryset(self):
-        gadget = self.get_gadget()
-        queryset = TelemetryReading.objects.filter(gadget=gadget)
-        key = self.request.query_params.get("key")
-        if key:
-            queryset = queryset.filter(key=key)
-        since = parse_datetime(self.request.query_params.get("since", "") or "")
-        if since:
-            queryset = queryset.filter(recorded_at__gte=since)
-        return queryset
-
-
-class GadgetLatestView(OwnedGadgetMixin, APIView):
-    """The most recent value per telemetry key — what a dashboard opens with."""
-
-    def get(self, request, uid):
-        gadget = self.get_gadget()
-        latest_ids = (
-            TelemetryReading.objects.filter(gadget=gadget)
-            .values("key")
-            .annotate(newest=Max("id"))
-            .values_list("newest", flat=True)
-        )
-        readings = TelemetryReading.objects.filter(id__in=list(latest_ids))
-        return Response(
-            {
-                "gadget": str(gadget.uid),
-                "online": presence.is_online(gadget.uid),
-                "readings": {
-                    reading.key: {
-                        "value": reading.value,
-                        "recorded_at": reading.recorded_at,
-                    }
-                    for reading in readings
-                },
-            }
-        )
 
 
 class GadgetCommandsView(OwnedGadgetMixin, generics.ListAPIView):

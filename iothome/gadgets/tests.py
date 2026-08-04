@@ -17,7 +17,7 @@ from core.signatures import (
 )
 from purchases.models import Product
 
-from .models import Capability, Command, Gadget, GadgetType, TelemetryReading
+from .models import Capability, Command, Gadget, GadgetType
 
 User = get_user_model()
 
@@ -219,14 +219,16 @@ class GadgetAPITests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["secret_key"], self.gadget.secret_key)
 
-    def test_latest_readings_returns_the_newest_per_key(self):
-        TelemetryReading.store(self.gadget, "temperature", 20.0)
-        TelemetryReading.store(self.gadget, "temperature", 22.5)
+    def test_command_history_is_readable(self):
+        Command.objects.create(
+            gadget=self.gadget, issued_by=self.owner, key="power", value=True
+        )
         self.client.force_authenticate(self.owner)
         response = self.client.get(
-            reverse("gadgets:latest", kwargs={"uid": self.gadget.uid})
+            reverse("gadgets:commands", kwargs={"uid": self.gadget.uid})
         )
-        self.assertEqual(response.data["readings"]["temperature"]["value"], 22.5)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["key"], "power")
 
     def test_disable_blocks_future_connections(self):
         self.client.force_authenticate(self.owner)
@@ -264,6 +266,28 @@ class CommandExpiryTests(TestCase):
             self.assertTrue(expire_command(str(command.request_id)))
         command.refresh_from_db()
         self.assertEqual(command.status, Command.STATUS_TIMEOUT)
+
+    def test_retention_drops_commands_past_ninety_days(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from .tasks import prune_old_commands
+
+        old = Command.objects.create(
+            gadget=self.gadget, issued_by=self.user, key="power", value=True
+        )
+        recent = Command.objects.create(
+            gadget=self.gadget, issued_by=self.user, key="power", value=False
+        )
+        # created_at is auto_now_add, so age it after the fact.
+        Command.objects.filter(pk=old.pk).update(
+            created_at=timezone.now() - timedelta(days=120)
+        )
+
+        self.assertEqual(prune_old_commands(), 1)
+        self.assertFalse(Command.objects.filter(pk=old.pk).exists())
+        self.assertTrue(Command.objects.filter(pk=recent.pk).exists())
 
     def test_acked_command_is_left_alone(self):
         from .tasks import expire_command

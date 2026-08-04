@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import time
 
 from asgiref.sync import sync_to_async
@@ -13,7 +14,7 @@ from django.utils import timezone
 from core.signatures import SignatureError, averify_frame, build_message
 
 from . import presence, protocol
-from .models import Capability, Command, Gadget, TelemetryReading
+from .models import Capability, Command, Gadget
 
 logger = logging.getLogger("iothome.ws")
 
@@ -294,8 +295,11 @@ class DeviceConsumer(BaseSignedConsumer):
                 await self.send_error("invalid_value", "; ".join(exc.messages))
                 return
 
+        # Telemetry is validated and relayed, never persisted: a sensor
+        # reporting every few seconds would fill the database with values
+        # nobody reads back. If the owner has no socket open, group_send
+        # reaches nobody and the reading is simply dropped.
         recorded_at = timezone.now()
-        await self.store_readings(cleaned, recorded_at)
         await presence.atouch(self.uid, self.offline_timeout)
         await self.channel_layer.group_send(
             presence.user_group(self.gadget.owner_id),
@@ -306,29 +310,6 @@ class DeviceConsumer(BaseSignedConsumer):
                 "recorded_at": recorded_at.isoformat(),
             },
         )
-
-    @database_sync_to_async
-    def store_readings(self, cleaned, recorded_at):
-        TelemetryReading.objects.bulk_create(
-            [
-                TelemetryReading(
-                    gadget=self.gadget,
-                    key=key,
-                    recorded_at=recorded_at,
-                    value_bool=value if isinstance(value, bool) else None,
-                    value_number=(
-                        float(value)
-                        if isinstance(value, (int, float)) and not isinstance(value, bool)
-                        else None
-                    ),
-                    value_text="" if not isinstance(value, str) else value[:255],
-                )
-                for key, value in cleaned.items()
-            ]
-        )
-        # last_seen_at is deliberately *not* touched here: a sensor reporting
-        # every few seconds would double the write load for a column the
-        # reconcile_last_seen task refreshes from Redis anyway.
 
     async def on_command_result(self, payload):
         request_id = payload.get("request_id")
@@ -387,6 +368,10 @@ class DeviceConsumer(BaseSignedConsumer):
             }
         )
 
+    async def device_state_request(self, event):
+        """An owner just came online and wants to know where things stand."""
+        await self.send_json({"type": protocol.MSG_STATE_REQUEST})
+
     async def device_disconnect(self, event):
         reason = event.get("reason", "closed")
         code = (
@@ -438,7 +423,43 @@ class UserConsumer(BaseSignedConsumer):
         self.user = None
         self.token = None
         self.token_expires_at = 0
+        # Gadgets we have polled for state and not heard back from yet.
+        self._awaiting_state = set()
+        self._state_tasks = set()
         await super().connect()
+
+    async def request_state(self, uids):
+        """Poll gadgets for their current state and watch for silence.
+
+        A device that never answers is not treated as dead — liveness is the
+        heartbeat's job, and a slow reply is not a lost connection. All that
+        happens is the dashboard gets told the value is unknown, so it can
+        show that instead of an endless spinner.
+        """
+        for uid in uids:
+            uid = str(uid)
+            self._awaiting_state.add(uid)
+            await self.channel_layer.group_send(
+                presence.device_group(uid),
+                {"type": protocol.EVENT_DEVICE_STATE_REQUEST},
+            )
+            task = asyncio.create_task(self._flag_if_silent(uid))
+            self._state_tasks.add(task)
+            task.add_done_callback(self._state_tasks.discard)
+
+    async def _flag_if_silent(self, uid):
+        try:
+            await asyncio.sleep(settings.STATE_REQUEST_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            return
+        if uid not in self._awaiting_state:
+            return
+        self._awaiting_state.discard(uid)
+        # If it dropped offline meanwhile, device.status already said so and
+        # a second message would only muddy the picture.
+        if not await presence.ais_online(uid):
+            return
+        await self.send_json({"type": protocol.MSG_STATE_UNKNOWN, "gadget": uid})
 
     async def handle(self, payload):
         message_type = payload.get("type")
@@ -455,6 +476,8 @@ class UserConsumer(BaseSignedConsumer):
 
         if message_type == protocol.MSG_COMMAND:
             await self.on_command(payload)
+        elif message_type == protocol.MSG_REFRESH_STATE:
+            await self.on_refresh_state(payload)
         elif message_type == protocol.MSG_HEARTBEAT:
             await self.send_json(
                 {"type": protocol.MSG_PONG, "server_time": int(time.time())}
@@ -506,6 +529,12 @@ class UserConsumer(BaseSignedConsumer):
             }
         )
 
+        # Nothing is cached server-side, so the dashboard starts empty. Ask
+        # every online gadget to report where it stands; each answers with an
+        # ordinary telemetry frame that lands on this socket a moment later.
+        # Offline gadgets are not polled — device.status already covers them.
+        await self.request_state(online)
+
     @database_sync_to_async
     def resolve_token(self, raw_token):
         from rest_framework_simplejwt.authentication import JWTAuthentication
@@ -540,6 +569,57 @@ class UserConsumer(BaseSignedConsumer):
                 owner=self.user
             )
         ]
+
+    async def on_refresh_state(self, payload):
+        """Re-poll gadgets on demand — the dashboard's refresh button.
+
+        Unsigned on purpose: this reads, it does not change anything on the
+        hardware, and the socket already proved who it belongs to at the
+        handshake. What it does need is a cooldown, since one frame fans out
+        to every gadget the user owns.
+        """
+        now = time.monotonic()
+        elapsed = now - getattr(self, "_last_refresh", -math.inf)
+        if elapsed < settings.STATE_REFRESH_MIN_INTERVAL_SECONDS:
+            await self.send_error(
+                "refresh_too_soon",
+                f"Wait {settings.STATE_REFRESH_MIN_INTERVAL_SECONDS - int(elapsed)}s "
+                "before refreshing again.",
+            )
+            return
+        self._last_refresh = now
+
+        requested = payload.get("gadgets")
+        if requested is not None:
+            if not isinstance(requested, list) or len(requested) > 100:
+                await self.send_error("bad_payload", "'gadgets' must be a short list.")
+                return
+            requested = {str(uid) for uid in requested}
+
+        # Ownership is re-read rather than remembered from the handshake, so a
+        # gadget that changed hands mid-session cannot be polled by its old
+        # owner.
+        owned = await self.owned_uids()
+        targets = owned if requested is None else owned & requested
+        online = await presence.aonline_uids(sorted(targets))
+
+        await self.request_state(online)
+        await self.send_json(
+            {
+                "type": protocol.MSG_REFRESH_ACK,
+                "polled": sorted(online),
+                "skipped_offline": sorted(targets - online),
+            }
+        )
+
+    @database_sync_to_async
+    def owned_uids(self):
+        return {
+            str(uid)
+            for uid in Gadget.objects.filter(owner=self.user).values_list(
+                "uid", flat=True
+            )
+        }
 
     # -- commands ---------------------------------------------------------
 
@@ -669,6 +749,9 @@ class UserConsumer(BaseSignedConsumer):
     # -- channel-layer events --------------------------------------------
 
     async def user_telemetry(self, event):
+        # Any reading answers an outstanding poll, whether it was solicited
+        # or just the sensor's next scheduled push.
+        self._awaiting_state.discard(str(event["gadget"]))
         await self.send_json(
             {
                 "type": protocol.MSG_TELEMETRY,
@@ -687,6 +770,14 @@ class UserConsumer(BaseSignedConsumer):
                 "reason": event.get("reason", ""),
             }
         )
+        if event["online"]:
+            # A gadget that just came up while this dashboard is open gets
+            # polled too. Doing it from here rather than from the device side
+            # means no user-presence bookkeeping: if nobody is watching, this
+            # method never runs and no request is sent.
+            await self.request_state([event["gadget"]])
+        else:
+            self._awaiting_state.discard(str(event["gadget"]))
 
     async def user_command_status(self, event):
         await self.send_json(
@@ -702,6 +793,10 @@ class UserConsumer(BaseSignedConsumer):
 
     async def disconnect(self, code):
         await super().disconnect(code)
+        for task in list(self._state_tasks):
+            task.cancel()
+        self._state_tasks.clear()
+        self._awaiting_state.clear()
         if self.user is not None:
             await self.channel_layer.group_discard(
                 presence.user_group(self.user.id), self.channel_name

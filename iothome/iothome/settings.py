@@ -199,6 +199,15 @@ WS_AUTH_TIMEOUT_SECONDS = env.int("WS_AUTH_TIMEOUT_SECONDS", default=10)
 WS_MAX_FRAMES_PER_MINUTE = env.int("WS_MAX_FRAMES_PER_MINUTE", default=240)
 # How long a command waits for the device's ack before it is marked timed out.
 COMMAND_TIMEOUT_SECONDS = env.int("COMMAND_TIMEOUT_SECONDS", default=15)
+# How long a dashboard waits for a polled gadget to report its state before
+# the UI is told the value is unknown.
+STATE_REQUEST_TIMEOUT_SECONDS = env.int("STATE_REQUEST_TIMEOUT_SECONDS", default=10)
+# Minimum gap between manual refreshes on one socket. A refresh fans out to
+# every gadget the user owns, so an unthrottled button is a way to hammer the
+# hardware from the browser.
+STATE_REFRESH_MIN_INTERVAL_SECONDS = env.int(
+    "STATE_REFRESH_MIN_INTERVAL_SECONDS", default=3
+)
 # Fallback offline threshold for gadget types that do not define their own.
 DEFAULT_OFFLINE_TIMEOUT_SECONDS = env.int("DEFAULT_OFFLINE_TIMEOUT_SECONDS", default=180)
 

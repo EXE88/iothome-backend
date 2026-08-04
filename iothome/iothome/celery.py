@@ -24,8 +24,8 @@ app.conf.beat_schedule = {
         "task": "gadgets.tasks.expire_stale_commands",
         "schedule": 60.0,
     },
-    "prune-old-telemetry": {
-        "task": "gadgets.tasks.prune_old_telemetry",
+    "prune-old-commands": {
+        "task": "gadgets.tasks.prune_old_commands",
         "schedule": crontab(hour=4, minute=0),
     },
 }

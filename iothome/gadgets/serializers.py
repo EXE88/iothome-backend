@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Capability, Command, Gadget, GadgetType, TelemetryReading
+from .models import Capability, Command, Gadget, GadgetType
 
 
 class CapabilitySerializer(serializers.ModelSerializer):
@@ -58,23 +58,6 @@ class GadgetSerializer(serializers.ModelSerializer):
 
     def get_online(self, obj):
         return str(obj.uid) in self.context.get("online_uids", set())
-
-
-class LatestReadingSerializer(serializers.Serializer):
-    key = serializers.CharField()
-    value = serializers.JSONField()
-    recorded_at = serializers.DateTimeField()
-
-
-class TelemetryReadingSerializer(serializers.ModelSerializer):
-    value = serializers.SerializerMethodField()
-
-    class Meta:
-        model = TelemetryReading
-        fields = ("key", "value", "recorded_at")
-
-    def get_value(self, obj):
-        return obj.value
 
 
 class CommandSerializer(serializers.ModelSerializer):

@@ -8,8 +8,6 @@ urlpatterns = [
     path("types/", views.GadgetTypeListView.as_view(), name="type-list"),
     path("", views.GadgetListView.as_view(), name="list"),
     path("<uuid:uid>/", views.GadgetDetailView.as_view(), name="detail"),
-    path("<uuid:uid>/readings/", views.GadgetReadingsView.as_view(), name="readings"),
-    path("<uuid:uid>/latest/", views.GadgetLatestView.as_view(), name="latest"),
     path("<uuid:uid>/commands/", views.GadgetCommandsView.as_view(), name="commands"),
     path("<uuid:uid>/disable/", views.DisableGadgetView.as_view(), name="disable"),
     path(
