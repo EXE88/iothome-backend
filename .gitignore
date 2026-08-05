@@ -267,3 +267,4 @@ pyrightconfig.json
 # Collected by collectstatic; rebuilt on every deploy.
 staticfiles/
 .claude/
+.impeccable/
