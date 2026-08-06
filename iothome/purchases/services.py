@@ -18,7 +18,7 @@ class CheckoutError(Exception):
 
 
 @transaction.atomic
-def create_order(*, user, items, wifi_ssid, wifi_password, **shipping):
+def create_order(*, user, items, wifi_ssid, wifi_password, return_origin="", **shipping):
     """Reserve stock and freeze prices into one pending order.
 
     ``items`` is ``[{"product": <id>, "quantity": <n>}, ...]`` — the basket.
@@ -58,6 +58,7 @@ def create_order(*, user, items, wifi_ssid, wifi_password, **shipping):
         total_amount=total,
         wifi_ssid=wifi_ssid,
         wifi_password=wifi_password,
+        return_origin=return_origin,
         **shipping,
     )
 
@@ -159,6 +160,18 @@ def finalize_payment(*, authority, gateway_status):
     payment.verified_at = timezone.now()
     payment.save()
 
+    # The order may have been written off by the expiry sweep while the buyer
+    # was still at the gateway. They paid; the order stands, and the stock it
+    # was holding has to be taken back off the shelf.
+    if order.status != Order.STATUS_PENDING_PAYMENT:
+        logger.warning(
+            "order %s was %s when payment %s confirmed; reinstating it",
+            order.uid,
+            order.status,
+            payment.authority,
+        )
+        _reclaim_stock(order)
+
     order.status = Order.STATUS_PAID
     order.save(update_fields=["status"])
 
@@ -191,8 +204,14 @@ def provision_gadgets(order):
     ]
 
 
-def _release_order(order, status):
-    """Return reserved stock, line by line, when a payment does not go through."""
+@transaction.atomic
+def release_order(order, status):
+    """Return reserved stock, line by line, when a payment does not go through.
+
+    Guarded on the order still being unpaid, so calling it twice — a failed
+    callback and then the expiry sweep, say — cannot hand the stock back
+    twice.
+    """
     if order.status != Order.STATUS_PENDING_PAYMENT:
         return
     for item in order.items.all():
@@ -201,3 +220,33 @@ def _release_order(order, status):
         )
     order.status = status
     order.save(update_fields=["status"])
+
+
+# Kept as the private name the callers in this module already use.
+_release_order = release_order
+
+
+def _reclaim_stock(order):
+    """Take the stock back for an order that was released and then paid for.
+
+    This is the race the expiry sweep creates: the sweep decides a checkout
+    was abandoned and puts the units back on the shelf, and a moment later the
+    gateway confirms the buyer did pay. The money is real, so the order is
+    honoured either way — but the shelf count has to be corrected, and if
+    someone else bought the last one in between, that needs a human, so it is
+    logged loudly rather than silently clamped.
+    """
+    for item in order.items.select_related("product"):
+        updated = Product.objects.filter(
+            pk=item.product_id, stock__gte=item.quantity
+        ).update(stock=models.F("stock") - item.quantity)
+        if not updated:
+            logger.error(
+                "order %s was paid after its stock was released, and %s no "
+                "longer has %s in stock — this order is oversold and needs a "
+                "human",
+                order.uid,
+                item.product.slug,
+                item.quantity,
+            )
+            Product.objects.filter(pk=item.product_id).update(stock=0)

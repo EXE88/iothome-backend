@@ -4,6 +4,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .emails import send_otp_email
@@ -110,6 +112,35 @@ class LoginView(TokenObtainPairView):
     serializer_class = LoginSerializer
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "login"
+
+
+class LogoutView(APIView):
+    """Retire a refresh token so the session ends everywhere, not just here.
+
+    Dropping the cookie only ends the session in the browser that dropped it.
+    The token itself stays valid for its whole lifetime, so any other copy —
+    another tab, the same site opened under a different hostname, a saved
+    request — keeps working, and the user is told they logged out while they
+    demonstrably did not.
+
+    `AllowAny`: the access token has usually expired or been thrown away by
+    the time someone logs out, and the refresh token in the body is proof
+    enough of what is being retired. A token that is already blacklisted,
+    expired or malformed answers 200 as well — logging out twice is not an
+    error, and saying "that token is invalid" would turn this into an oracle.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        token = request.data.get("refresh")
+        if token:
+            try:
+                RefreshToken(token).blacklist()
+            except TokenError:
+                pass
+        return Response({"detail": "Signed out."})
 
 
 class MeView(generics.RetrieveUpdateAPIView):

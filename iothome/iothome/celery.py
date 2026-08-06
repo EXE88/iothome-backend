@@ -28,4 +28,16 @@ app.conf.beat_schedule = {
         "task": "gadgets.tasks.prune_old_commands",
         "schedule": crontab(hour=4, minute=0),
     },
+    # Stock is reserved at checkout, so an abandoned gateway tab holds units
+    # nobody is buying until this runs.
+    "expire-stale-orders": {
+        "task": "purchases.tasks.expire_stale_orders",
+        "schedule": 300.0,
+    },
+    # The backstop for money taken without a callback. Zarinpal reverses those
+    # after 72 hours, so hourly is soon enough and gentle on the gateway.
+    "reconcile-unverified-payments": {
+        "task": "purchases.tasks.reconcile_unverified_payments",
+        "schedule": crontab(minute=17),
+    },
 }

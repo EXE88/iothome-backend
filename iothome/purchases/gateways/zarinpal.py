@@ -85,6 +85,18 @@ def request_payment(*, amount_toman, description, callback_url, email="", mobile
     return data["authority"], data
 
 
+def unverified_payments():
+    """Transactions Zarinpal settled that we never confirmed.
+
+    Its own reason for existing: a callback that never arrived leaves money
+    taken and no order, and Zarinpal reverses it after 72 hours. Returns a
+    list of session dicts, each with at least an ``authority``.
+    """
+    data = _post("/pg/v4/payment/unVerified.json", {})
+    sessions = data.get("authorities") or data.get("sessions") or []
+    return sessions if isinstance(sessions, list) else []
+
+
 def verify_payment(*, amount_toman, authority):
     """Confirm a returning payment. Returns the gateway's data block.
 

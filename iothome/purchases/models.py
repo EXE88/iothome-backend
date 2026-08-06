@@ -94,6 +94,14 @@ class Order(models.Model):
         max_length=24, choices=STATUS_CHOICES, default=STATUS_PENDING_PAYMENT
     )
     tracking_code = models.CharField(max_length=64, blank=True)
+
+    # Which origin the buyer checked out from, so the gateway callback can
+    # send them back to the same one. The site is reachable under more than
+    # one hostname in development (localhost and 127.0.0.1 at least), and
+    # those do not share cookies — bouncing someone to the other one drops
+    # them into whatever session that hostname happens to be holding. Only
+    # ever set from the CORS allowlist, never from user input.
+    return_origin = models.URLField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -1,5 +1,5 @@
 import logging
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, urlunparse
 
 from django.conf import settings
 from django.shortcuts import redirect
@@ -28,6 +28,36 @@ class ProductDetailView(generics.RetrieveAPIView):
     permission_classes = [AllowAny]
     lookup_field = "slug"
     queryset = Product.objects.select_related("gadget_type").filter(is_active=True)
+
+
+def allowed_return_origin(request):
+    """The origin this request came from, if we serve that origin.
+
+    Checked against CORS_ALLOWED_ORIGINS rather than trusted, because the
+    result becomes a redirect target: an unchecked `Origin` header would turn
+    the payment callback into an open redirect that a phishing page could
+    point anywhere. Anything unrecognised falls back to the configured
+    default.
+    """
+    origin = request.headers.get("Origin", "")
+    return origin if origin in settings.CORS_ALLOWED_ORIGINS else ""
+
+
+def payment_result_url(order):
+    """Where to send the browser once the gateway has been settled.
+
+    The path is configured; the host follows the buyer. The site answers on
+    more than one hostname in development and those hostnames do not share
+    cookies, so returning someone to a different one signs them out — or
+    worse, signs them in as whoever last used that hostname.
+    """
+    configured = urlparse(settings.FRONTEND_PAYMENT_RESULT_URL)
+    if not order.return_origin:
+        return settings.FRONTEND_PAYMENT_RESULT_URL
+    chosen = urlparse(order.return_origin)
+    return urlunparse(
+        (chosen.scheme, chosen.netloc, configured.path, "", "", "")
+    )
 
 
 def orders_of(user):
@@ -76,6 +106,7 @@ class CheckoutView(APIView):
                 receiver_phone=data["receiver_phone"],
                 shipping_address=data["shipping_address"],
                 postal_code=data.get("postal_code", ""),
+                return_origin=allowed_return_origin(request),
             )
             payment, payment_url = start_payment(
                 order, settings.ZARINPAL_CALLBACK_URL
@@ -110,6 +141,7 @@ class PaymentVerifyView(APIView):
         gateway_status = request.query_params.get("Status", "")
 
         result = {"authority": authority}
+        destination = settings.FRONTEND_PAYMENT_RESULT_URL
         try:
             payment, gadgets = finalize_payment(
                 authority=authority, gateway_status=gateway_status
@@ -118,9 +150,10 @@ class PaymentVerifyView(APIView):
             result["order"] = str(payment.order.uid)
             result["ref_id"] = payment.ref_id
             result["gadgets"] = len(gadgets)
+            destination = payment_result_url(payment.order)
         except CheckoutError as exc:
             logger.warning("payment callback failed for %s: %s", authority, exc)
             result["status"] = "failed"
             result["detail"] = str(exc)
 
-        return redirect(f"{settings.FRONTEND_PAYMENT_RESULT_URL}?{urlencode(result)}")
+        return redirect(f"{destination}?{urlencode(result)}")

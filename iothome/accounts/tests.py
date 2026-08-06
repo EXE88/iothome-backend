@@ -177,3 +177,66 @@ class PasswordResetTests(APITestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(mail.outbox), 0)
+
+
+class LogoutTests(APITestCase):
+    """Logging out has to end the session everywhere, not just in one browser.
+
+    The site answers on more than one hostname and each keeps its own cookie
+    jar, so "drop the cookie" only ever meant "drop it here" — you could log
+    out, sign in as someone else, and find the first account still live under
+    the other hostname.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="out@gmail.com", password="pass-12345", is_email_verified=True
+        )
+        response = self.client.post(
+            reverse("accounts:login"),
+            {"email": "out@gmail.com", "password": "pass-12345"},
+            format="json",
+        )
+        self.refresh = response.data["refresh"]
+
+    def test_the_token_works_before_logging_out(self):
+        response = self.client.post(
+            reverse("accounts:token-refresh"), {"refresh": self.refresh}, format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_logging_out_kills_the_token(self):
+        self.assertEqual(
+            self.client.post(
+                reverse("accounts:logout"), {"refresh": self.refresh}, format="json"
+            ).status_code,
+            200,
+        )
+        response = self.client.post(
+            reverse("accounts:token-refresh"), {"refresh": self.refresh}, format="json"
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_logging_out_twice_is_not_an_error(self):
+        for _ in range(2):
+            response = self.client.post(
+                reverse("accounts:logout"), {"refresh": self.refresh}, format="json"
+            )
+            self.assertEqual(response.status_code, 200)
+
+    def test_a_nonsense_token_is_accepted_quietly(self):
+        response = self.client.post(
+            reverse("accounts:logout"), {"refresh": "not-a-token"}, format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_the_refresh_token_is_not_rotated(self):
+        """The seven-day window is absolute, so the same token keeps working."""
+        response = self.client.post(
+            reverse("accounts:token-refresh"), {"refresh": self.refresh}, format="json"
+        )
+        self.assertNotIn("refresh", response.data)
+        again = self.client.post(
+            reverse("accounts:token-refresh"), {"refresh": self.refresh}, format="json"
+        )
+        self.assertEqual(again.status_code, 200)

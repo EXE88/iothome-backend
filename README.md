@@ -122,7 +122,7 @@ plain script with no Django import, so it can be copied to another machine and
 pointed at a deployed server. Run **one** copy at a time: two processes
 claiming the same device uid evict each other in a loop (close code 4006).
 
-**5 — Celery (optional).**
+**5 — Celery.**
 
 ```bash
 cd D:\PythonFiles\iothome\backend\iothome && ..\env\Scripts\python.exe -m celery -A iothome worker -l info -P solo
@@ -132,10 +132,15 @@ cd D:\PythonFiles\iothome\backend\iothome && ..\env\Scripts\python.exe -m celery
 cd D:\PythonFiles\iothome\backend\iothome && ..\env\Scripts\python.exe -m celery -A iothome beat -l info
 ```
 
-Skip these and everything still works, with one exception: a device that dies
-*without* closing its socket — power cut, cable pulled — is only noticed by
-the sweeper these run. Ctrl+C on a simulator is a clean disconnect and is
-detected instantly either way.
+Two things only happen if these are running:
+
+- A device that dies *without* closing its socket — power cut, cable pulled —
+  is only noticed by the sweeper. Ctrl+C on a simulator is a clean disconnect
+  and is detected instantly either way.
+- Abandoned checkouts are only released by `expire_stale_orders`. Stock is
+  reserved the moment an order is created, so without this a buyer who closes
+  the gateway tab holds those units indefinitely. See *Abandoned checkouts*
+  below.
 
 ### Test accounts
 
@@ -304,6 +309,45 @@ A cancelled or failed payment returns the reserved stock.
 Staff read `GET /api/gadgets/<uid>/provisioning/` at assembly time; that is the
 only endpoint that reveals a secret key or a Wi-Fi password.
 
+**Abandoned checkouts.** Closing the gateway tab sends nothing anywhere —
+Zarinpal has no "the buyer left" callback — so from the server an abandoned
+checkout and one still in progress look identical, and only time separates
+them. `expire_stale_orders` runs every five minutes and takes any order still
+unpaid after `PENDING_ORDER_TIMEOUT_MINUTES` (30). Before releasing anything it
+**asks the gateway whether that authority was actually paid**, because the
+nastiest version of this is the buyer who paid and *then* closed the tab;
+cancelling that would take their money and give them nothing. Paid ones are
+finalised and provisioned as usual, the rest are cancelled and their stock
+goes back.
+
+`reconcile_unverified_payments` runs hourly as the backstop: it asks Zarinpal
+for transactions it settled that we never confirmed — a callback lost to a
+restart, say — and turns them into real orders. Zarinpal reverses those after
+72 hours, so this has to run more often than that.
+
+If a sweep releases an order and the gateway then confirms it anyway, the
+payment wins: the order is reinstated and the stock is taken back off the
+shelf. If someone else bought the last unit in between, that is logged as an
+error naming the order, because only a human can resolve it.
+
+**Sessions.** Access tokens last a day, refresh tokens seven, and rotation is
+**off** — so the seven days are absolute rather than sliding, and a user who
+signed in a week ago signs in again. `POST /api/auth/logout/` blacklists the
+refresh token, which is what makes logging out apply to every browser holding
+it rather than only the one that dropped its cookie. Run
+`manage.py flushexpiredtokens` occasionally to keep the blacklist table
+small.
+
+**One hostname.** `localhost:3000` and `127.0.0.1:3000` are one site to a
+person and two to a browser: separate cookie jars, so separate logins. Sign
+out of one, sign in as somebody else, type the other into the address bar, and
+the first account is still there — which reads as the app swapping accounts by
+itself. Two things guard against it: the frontend pins a host via
+`NEXT_PUBLIC_SITE_ORIGIN`, and the payment callback returns the buyer to the
+origin they checked out from rather than a fixed one. That origin is checked
+against `CORS_ALLOWED_ORIGINS` before use — unchecked, it would make the
+callback an open redirect.
+
 **2. The device.** Firmware holds `uid`, `secret_key`, SSID and password. On
 boot it joins Wi-Fi and opens `ws://host/ws/device/<uid>/`, then proves itself
 (below). After that it heartbeats, pushes telemetry, and answers commands.
@@ -441,9 +485,9 @@ blank on a freshly opened dashboard until its next telemetry frame.
 
 ## Still to do
 
-- Blacklist refresh tokens on logout (`simplejwt.token_blacklist`). Logout
-  currently drops the cookie, which ends the session on that browser only.
-- Serve behind TLS: `wss://` and a `Secure` cookie posture.
+- Serve behind TLS: `wss://` and a `Secure` cookie posture. The reverse proxy
+  should also do the canonical-host redirect, which the app currently only
+  does client-side.
 - A server-time endpoint. Signatures need clocks within
   `SIGNATURE_MAX_SKEW_SECONDS`, and a phone with a wrong clock fails with an
   unhelpful `auth_failed`.

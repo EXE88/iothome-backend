@@ -29,6 +29,10 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    # Makes logging out mean something: without it a refresh token stays valid
+    # until it expires, so dropping the cookie only ends the session on the
+    # browser that dropped it.
+    "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
     "channels",
     "django_celery_beat",
@@ -137,7 +141,18 @@ REFRESH_TOKEN_LIFETIME_DAYS = env.int("REFRESH_TOKEN_LIFETIME_DAYS", default=7)
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=ACCESS_TOKEN_LIFETIME_MINUTES),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=REFRESH_TOKEN_LIFETIME_DAYS),
-    "ROTATE_REFRESH_TOKENS": True,
+    # Rotation is off on purpose, for two reasons.
+    #
+    # It makes the refresh window absolute rather than sliding: seven days
+    # after signing in you sign in again, which is the rule this product
+    # wants. With rotation, anyone who visits daily never expires at all.
+    #
+    # And rotation plus blacklisting races against ordinary browsing. Every
+    # page load asks for a fresh access token, so opening two tabs at once
+    # sends the same refresh token twice; the first rotates it and the second
+    # arrives holding a token that has just been blacklisted, and that tab
+    # falls out of the session for no reason the user can see.
+    "ROTATE_REFRESH_TOKENS": False,
     "BLACKLIST_AFTER_ROTATION": False,
     "AUTH_HEADER_TYPES": ("Bearer",),
     "USER_ID_FIELD": "id",
@@ -219,6 +234,10 @@ STATE_REFRESH_MIN_INTERVAL_SECONDS = env.int(
 )
 # Fallback offline threshold for gadget types that do not define their own.
 DEFAULT_OFFLINE_TIMEOUT_SECONDS = env.int("DEFAULT_OFFLINE_TIMEOUT_SECONDS", default=180)
+# How long an order may sit unpaid before the sweep releases its stock.
+# Comfortably longer than a gateway session, because the sweep cannot tell an
+# abandoned checkout from one where the buyer is still typing a card number.
+PENDING_ORDER_TIMEOUT_MINUTES = env.int("PENDING_ORDER_TIMEOUT_MINUTES", default=30)
 
 # --------------------------------------------------------------------------
 # Zarinpal
