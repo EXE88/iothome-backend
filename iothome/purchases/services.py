@@ -8,7 +8,7 @@ from django.utils import timezone
 from gadgets.models import Gadget
 
 from .gateways import zarinpal
-from .models import Order, Payment, Product
+from .models import Order, OrderItem, Payment, Product
 
 logger = logging.getLogger("iothome.purchases")
 
@@ -18,31 +18,64 @@ class CheckoutError(Exception):
 
 
 @transaction.atomic
-def create_order(*, user, product_id, quantity, wifi_ssid, wifi_password, **shipping):
-    """Reserve stock and freeze the price into a pending order."""
-    product = (
-        Product.objects.select_for_update().filter(pk=product_id, is_active=True).first()
-    )
-    if product is None:
-        raise CheckoutError("This product is not available.")
-    if product.stock < quantity:
-        raise CheckoutError("Not enough stock for this product.")
+def create_order(*, user, items, wifi_ssid, wifi_password, **shipping):
+    """Reserve stock and freeze prices into one pending order.
 
-    # Stock is held from checkout, not from payment, so two buyers cannot be
-    # sent to the gateway for the same last unit. Cancellation returns it.
-    product.stock -= quantity
-    product.save(update_fields=["stock"])
+    ``items`` is ``[{"product": <id>, "quantity": <n>}, ...]`` — the basket.
+    Either the whole basket is reserved or none of it is: the transaction plus
+    ``select_for_update`` means a buyer never ends up paying for an order in
+    which one line quietly went out of stock between the checks.
+    """
+    if not items:
+        raise CheckoutError("The basket is empty.")
 
-    return Order.objects.create(
+    wanted = {}
+    for line in items:
+        # A basket that lists the same product twice is one line with the
+        # quantities added, which is also what the unique constraint requires.
+        wanted[line["product"]] = wanted.get(line["product"], 0) + line["quantity"]
+
+    # Locked in a stable order, so two concurrent baskets holding the same two
+    # products cannot each take one lock and wait on the other.
+    products = {
+        product.pk: product
+        for product in Product.objects.select_for_update()
+        .filter(pk__in=wanted, is_active=True)
+        .order_by("pk")
+    }
+
+    total = 0
+    for product_id, quantity in wanted.items():
+        product = products.get(product_id)
+        if product is None:
+            raise CheckoutError("One of these products is not available.")
+        if product.stock < quantity:
+            raise CheckoutError(f"Not enough stock for {product.name}.")
+        total += product.price * quantity
+
+    order = Order.objects.create(
         user=user,
-        product=product,
-        quantity=quantity,
-        unit_price=product.price,
-        total_amount=product.price * quantity,
+        total_amount=total,
         wifi_ssid=wifi_ssid,
         wifi_password=wifi_password,
         **shipping,
     )
+
+    for product_id, quantity in wanted.items():
+        product = products[product_id]
+        # Stock is held from checkout, not from payment, so two buyers cannot
+        # be sent to the gateway for the same last unit. Cancellation returns
+        # it.
+        product.stock -= quantity
+        product.save(update_fields=["stock"])
+        OrderItem.objects.create(
+            order=order,
+            product=product,
+            quantity=quantity,
+            unit_price=product.price,
+        )
+
+    return order
 
 
 def start_payment(order, callback_url):
@@ -58,7 +91,7 @@ def start_payment(order, callback_url):
     try:
         authority, raw = zarinpal.request_payment(
             amount_toman=order.total_amount,
-            description=f"Order {order.uid} - {order.product.name}",
+            description=f"Order {order.uid} - {order.summary}",
             callback_url=callback_url,
             email=order.user.email,
             mobile=order.receiver_phone,
@@ -85,7 +118,8 @@ def finalize_payment(*, authority, gateway_status):
     """
     payment = (
         Payment.objects.select_for_update()
-        .select_related("order", "order__product", "order__user")
+        .select_related("order", "order__user")
+        .prefetch_related("order__items__product")
         .filter(authority=authority)
         .first()
     )
@@ -134,7 +168,7 @@ def finalize_payment(*, authority, gateway_status):
 
 
 def provision_gadgets(order):
-    """Create the physical units this order pays for.
+    """Create the physical units this order pays for, one per unit per line.
 
     Each unit gets its own secret key, and the order's Wi-Fi credentials are
     copied onto it — that pair is what gets flashed during assembly.
@@ -145,23 +179,25 @@ def provision_gadgets(order):
     return [
         Gadget.objects.create(
             owner=order.user,
-            product=order.product,
-            gadget_type=order.product.gadget_type,
+            product=item.product,
+            gadget_type=item.product.gadget_type,
             order=order,
             wifi_ssid=order.wifi_ssid,
             wifi_password=order.wifi_password,
             status=Gadget.STATUS_AWAITING_ASSEMBLY,
         )
-        for _ in range(order.quantity)
+        for item in order.items.select_related("product__gadget_type")
+        for _ in range(item.quantity)
     ]
 
 
 def _release_order(order, status):
-    """Return reserved stock when a payment does not go through."""
+    """Return reserved stock, line by line, when a payment does not go through."""
     if order.status != Order.STATUS_PENDING_PAYMENT:
         return
-    Product.objects.filter(pk=order.product_id).update(
-        stock=models.F("stock") + order.quantity
-    )
+    for item in order.items.all():
+        Product.objects.filter(pk=item.product_id).update(
+            stock=models.F("stock") + item.quantity
+        )
     order.status = status
     order.save(update_fields=["status"])

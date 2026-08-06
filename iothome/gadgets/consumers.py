@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import time
+import uuid
 
 from asgiref.sync import sync_to_async
 from channels.db import database_sync_to_async
@@ -637,6 +638,15 @@ class UserConsumer(BaseSignedConsumer):
                 "bad_payload", "request_id, gadget and key are required strings."
             )
             return
+        # Both go into UUID columns further down. Checking the shape here keeps
+        # a malformed id a bad frame the client is told about, rather than a
+        # database error that takes the whole socket down with a 1011.
+        for field, name in ((request_id, "request_id"), (gadget_uid, "gadget")):
+            try:
+                uuid.UUID(field)
+            except ValueError:
+                await self.send_error("bad_payload", f"'{name}' is not a UUID.")
+                return
         if time.time() >= self.token_expires_at:
             await self.fail(
                 "token_expired",

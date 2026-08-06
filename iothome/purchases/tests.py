@@ -14,7 +14,6 @@ from .services import CheckoutError, create_order, finalize_payment, start_payme
 User = get_user_model()
 
 VALID_ORDER = {
-    "quantity": 1,
     "wifi_ssid": "HomeNet",
     "wifi_password": "wifi-pass-1234",
     "receiver_name": "Test Buyer",
@@ -23,13 +22,18 @@ VALID_ORDER = {
 }
 
 
-def make_product(stock=5, price=1000):
+def make_product(stock=5, price=1000, slug="lamp"):
     gadget_type = GadgetType.objects.create(
-        slug="lamp", name="Lamp", mode=GadgetType.MODE_ACTION
+        slug=slug, name=slug.title(), mode=GadgetType.MODE_ACTION
     )
     return Product.objects.create(
-        gadget_type=gadget_type, name="Lamp", slug="lamp", price=price, stock=stock
+        gadget_type=gadget_type, name=slug.title(), slug=slug, price=price, stock=stock
     )
+
+
+def basket(*lines):
+    """`basket((product, 2), ...)` -> the `items` payload checkout expects."""
+    return [{"product": p.id, "quantity": q} for p, q in lines]
 
 
 class CheckoutTests(TestCase):
@@ -41,26 +45,67 @@ class CheckoutTests(TestCase):
 
     def test_stock_is_reserved_at_checkout(self):
         create_order(
-            user=self.user, product_id=self.product.id, **VALID_ORDER
+            user=self.user, items=basket((self.product, 1)), **VALID_ORDER
         )
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 4)
 
-    def test_price_is_frozen_on_the_order(self):
-        order = create_order(user=self.user, product_id=self.product.id, **VALID_ORDER)
+    def test_price_is_frozen_on_the_line(self):
+        order = create_order(user=self.user, items=basket((self.product, 1)), **VALID_ORDER)
         self.product.price = 9999
         self.product.save()
         order.refresh_from_db()
-        self.assertEqual(int(order.unit_price), 1000)
+        self.assertEqual(int(order.items.get().unit_price), 1000)
+        self.assertEqual(int(order.total_amount), 1000)
 
     def test_out_of_stock_is_refused(self):
         self.product.stock = 0
         self.product.save()
         with self.assertRaises(CheckoutError):
-            create_order(user=self.user, product_id=self.product.id, **VALID_ORDER)
+            create_order(user=self.user, items=basket((self.product, 1)), **VALID_ORDER)
+
+    def test_a_basket_of_several_products_is_one_order(self):
+        camera = make_product(stock=2, price=2400, slug="camera")
+        order = create_order(
+            user=self.user,
+            items=basket((self.product, 2), (camera, 1)),
+            **VALID_ORDER,
+        )
+        self.assertEqual(order.items.count(), 2)
+        self.assertEqual(int(order.total_amount), 1000 * 2 + 2400)
+        self.assertEqual(order.unit_count, 3)
+        self.product.refresh_from_db()
+        camera.refresh_from_db()
+        self.assertEqual(self.product.stock, 3)
+        self.assertEqual(camera.stock, 1)
+
+    def test_one_short_line_reserves_nothing_at_all(self):
+        camera = make_product(stock=0, price=2400, slug="camera")
+        with self.assertRaises(CheckoutError):
+            create_order(
+                user=self.user,
+                items=basket((self.product, 1), (camera, 1)),
+                **VALID_ORDER,
+            )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 5)
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_the_same_product_twice_becomes_one_line(self):
+        order = create_order(
+            user=self.user,
+            items=basket((self.product, 1), (self.product, 2)),
+            **VALID_ORDER,
+        )
+        self.assertEqual(order.items.count(), 1)
+        self.assertEqual(order.items.get().quantity, 3)
+
+    def test_an_empty_basket_is_refused(self):
+        with self.assertRaises(CheckoutError):
+            create_order(user=self.user, items=[], **VALID_ORDER)
 
     def test_wifi_credentials_never_come_back_out(self):
-        order = create_order(user=self.user, product_id=self.product.id, **VALID_ORDER)
+        order = create_order(user=self.user, items=basket((self.product, 1)), **VALID_ORDER)
         from .serializers import OrderSerializer
 
         data = OrderSerializer(order).data
@@ -75,7 +120,7 @@ class PaymentFlowTests(TestCase):
             email="buyer@gmail.com", password="pass-12345", is_email_verified=True
         )
         self.order = create_order(
-            user=self.user, product_id=self.product.id, **VALID_ORDER
+            user=self.user, items=basket((self.product, 1)), **VALID_ORDER
         )
 
     def start(self):
@@ -108,14 +153,30 @@ class PaymentFlowTests(TestCase):
         self.assertEqual(len(gadget.secret_key), 64)
 
     def test_each_gadget_gets_its_own_secret(self):
-        self.order.quantity = 3
-        self.order.save()
+        self.order.items.update(quantity=3)
         self.start()
         with mock.patch.object(
             zarinpal, "verify_payment", return_value={"code": 100, "ref_id": 1}
         ):
             _, gadgets = finalize_payment(authority="A0001", gateway_status="OK")
         self.assertEqual(len({g.secret_key for g in gadgets}), 3)
+
+    def test_a_mixed_basket_provisions_one_gadget_per_unit(self):
+        camera = make_product(stock=2, price=2400, slug="camera")
+        self.order = create_order(
+            user=self.user,
+            items=basket((self.product, 2), (camera, 1)),
+            **VALID_ORDER,
+        )
+        self.start()
+        with mock.patch.object(
+            zarinpal, "verify_payment", return_value={"code": 100, "ref_id": 1}
+        ):
+            _, gadgets = finalize_payment(authority="A0001", gateway_status="OK")
+        self.assertEqual(len(gadgets), 3)
+        self.assertEqual(
+            sorted(g.product.slug for g in gadgets), ["camera", "lamp", "lamp"]
+        )
 
     def test_replayed_callback_does_not_double_provision(self):
         self.start()
@@ -183,7 +244,7 @@ class CheckoutAPITests(APITestCase):
         ):
             response = self.client.post(
                 reverse("purchases:checkout"),
-                {"product": self.product.id, **VALID_ORDER},
+                {"items": basket((self.product, 1)), **VALID_ORDER},
                 format="json",
             )
         self.assertEqual(response.status_code, 201)
@@ -196,7 +257,7 @@ class CheckoutAPITests(APITestCase):
         self.client.force_authenticate(unverified)
         response = self.client.post(
             reverse("purchases:checkout"),
-            {"product": self.product.id, **VALID_ORDER},
+            {"items": basket((self.product, 1)), **VALID_ORDER},
             format="json",
         )
         self.assertEqual(response.status_code, 403)
@@ -205,7 +266,7 @@ class CheckoutAPITests(APITestCase):
         self.client.force_authenticate(self.user)
         response = self.client.post(
             reverse("purchases:checkout"),
-            {**VALID_ORDER, "product": self.product.id, "receiver_phone": "12345"},
+            {**VALID_ORDER, "items": basket((self.product, 1)), "receiver_phone": "12345"},
             format="json",
         )
         self.assertEqual(response.status_code, 400)
@@ -214,7 +275,7 @@ class CheckoutAPITests(APITestCase):
         self.client.force_authenticate(self.user)
         response = self.client.post(
             reverse("purchases:checkout"),
-            {**VALID_ORDER, "product": self.product.id, "wifi_ssid": "x" * 40},
+            {**VALID_ORDER, "items": basket((self.product, 1)), "wifi_ssid": "x" * 40},
             format="json",
         )
         self.assertEqual(response.status_code, 400)
@@ -223,7 +284,7 @@ class CheckoutAPITests(APITestCase):
         self.client.force_authenticate(self.user)
         response = self.client.post(
             reverse("purchases:checkout"),
-            {**VALID_ORDER, "product": self.product.id, "wifi_password": "abc"},
+            {**VALID_ORDER, "items": basket((self.product, 1)), "wifi_password": "abc"},
             format="json",
         )
         self.assertEqual(response.status_code, 400)
@@ -237,7 +298,7 @@ class CheckoutAPITests(APITestCase):
         stranger = User.objects.create_user(
             email="stranger@gmail.com", password="pass-12345", is_email_verified=True
         )
-        create_order(user=self.user, product_id=self.product.id, **VALID_ORDER)
+        create_order(user=self.user, items=basket((self.product, 1)), **VALID_ORDER)
         self.client.force_authenticate(stranger)
         response = self.client.get(reverse("purchases:order-list"))
         self.assertEqual(response.data["count"], 0)

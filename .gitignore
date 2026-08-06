@@ -268,3 +268,30 @@ pyrightconfig.json
 staticfiles/
 .claude/
 .impeccable/
+# ---------------------------------------------------------------------------
+# Project additions
+# ---------------------------------------------------------------------------
+
+# Assistant and design-tool working files.
+.claude/
+.impeccable/
+.cursor/
+.aider*
+AGENTS.md
+CLAUDE.md
+
+# Internal documents. README.md is this repository's front door and stays;
+# the rest are working notes kept outside the public history.
+*.md
+!README.md
+
+# Local environment. .env.example is the committed template.
+.env
+.env.*
+!.env.example
+
+# Editor and OS noise.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

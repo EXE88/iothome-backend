@@ -30,16 +30,21 @@ class ProductDetailView(generics.RetrieveAPIView):
     queryset = Product.objects.select_related("gadget_type").filter(is_active=True)
 
 
+def orders_of(user):
+    """One query shape for both order views, with the lines pulled in."""
+    return (
+        Order.objects.prefetch_related(
+            "items__product__gadget_type", "payments"
+        ).filter(user=user)
+    )
+
+
 class OrderListView(generics.ListAPIView):
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated, IsEmailVerified]
 
     def get_queryset(self):
-        return (
-            Order.objects.select_related("product", "product__gadget_type")
-            .prefetch_related("payments")
-            .filter(user=self.request.user)
-        )
+        return orders_of(self.request.user)
 
 
 class OrderDetailView(generics.RetrieveAPIView):
@@ -48,11 +53,7 @@ class OrderDetailView(generics.RetrieveAPIView):
     lookup_field = "uid"
 
     def get_queryset(self):
-        return (
-            Order.objects.select_related("product", "product__gadget_type")
-            .prefetch_related("payments")
-            .filter(user=self.request.user)
-        )
+        return orders_of(self.request.user)
 
 
 class CheckoutView(APIView):
@@ -68,8 +69,7 @@ class CheckoutView(APIView):
         try:
             order = create_order(
                 user=request.user,
-                product_id=data["product"],
-                quantity=data["quantity"],
+                items=data["items"],
                 wifi_ssid=data["wifi_ssid"],
                 wifi_password=data["wifi_password"],
                 receiver_name=data["receiver_name"],

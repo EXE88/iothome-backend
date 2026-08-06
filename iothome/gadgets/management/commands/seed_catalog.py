@@ -11,6 +11,14 @@ from django.db import transaction
 from gadgets.models import Capability, GadgetType
 from purchases.models import Product
 
+# Every key a device *accepts* must also be a key it *reports*.
+#
+# The server keeps no last-known value by design: when a dashboard opens it
+# asks each device to report itself, and the device answers with a telemetry
+# frame. A telemetry frame may only carry keys the type declares as telemetry,
+# so an actuator key that exists only as a command can never be reported —
+# which is what made a lamp's brightness snap back to nothing on reload. Each
+# command capability below therefore has a telemetry twin.
 CATALOG = [
     {
         "slug": "thermometer",
@@ -40,10 +48,12 @@ CATALOG = [
         ],
         "product": {
             "name": "SmartLife Thermometer",
+            "name_fa": "دماسنج اسمارت‌لایف",
             "slug": "smartlife-thermometer",
             "price": 850000,
             "stock": 50,
             "description": "Wi-Fi temperature and humidity sensor for any room.",
+            "description_fa": "سنسور دما و رطوبت وای‌فای، برای هر اتاقی.",
         },
     },
     {
@@ -75,21 +85,40 @@ CATALOG = [
                 "value_type": Capability.TYPE_ENUM,
                 "choices": ["warm", "neutral", "cool"],
             },
-            # The lamp does not stream, but it echoes its state after each
-            # command so the UI is never guessing.
+            # The lamp does not stream, but it echoes its whole state after
+            # each command and whenever it is polled, so the UI is never
+            # guessing and a reload does not lose the setting.
             {
                 "key": "power",
                 "label": "Power state",
                 "direction": Capability.DIRECTION_TELEMETRY,
                 "value_type": Capability.TYPE_BOOL,
             },
+            {
+                "key": "brightness",
+                "label": "Brightness state",
+                "direction": Capability.DIRECTION_TELEMETRY,
+                "value_type": Capability.TYPE_INT,
+                "unit": "%",
+                "min_value": 0,
+                "max_value": 100,
+            },
+            {
+                "key": "color",
+                "label": "Colour state",
+                "direction": Capability.DIRECTION_TELEMETRY,
+                "value_type": Capability.TYPE_ENUM,
+                "choices": ["warm", "neutral", "cool"],
+            },
         ],
         "product": {
             "name": "SmartLife Smart Lamp",
+            "name_fa": "لامپ هوشمند اسمارت‌لایف",
             "slug": "smartlife-smart-lamp",
             "price": 1250000,
             "stock": 30,
             "description": "Dimmable Wi-Fi lamp with three colour temperatures.",
+            "description_fa": "لامپ وای‌فای با شدت نور قابل تنظیم و سه رنگ نور.",
         },
     },
     {
@@ -120,6 +149,14 @@ CATALOG = [
                 "value_type": Capability.TYPE_BOOL,
             },
             {
+                "key": "motion_alerts",
+                "label": "Motion alerts state",
+                "direction": Capability.DIRECTION_TELEMETRY,
+                "value_type": Capability.TYPE_BOOL,
+            },
+            # The only reading here that is genuinely a sensor: it changes on
+            # its own and nobody sets it.
+            {
                 "key": "motion",
                 "label": "Motion",
                 "direction": Capability.DIRECTION_TELEMETRY,
@@ -128,10 +165,12 @@ CATALOG = [
         ],
         "product": {
             "name": "SmartLife Security Camera",
+            "name_fa": "دوربین امنیتی اسمارت‌لایف",
             "slug": "smartlife-security-camera",
             "price": 2400000,
             "stock": 20,
             "description": "Wi-Fi camera that records on command and flags motion.",
+            "description_fa": "دوربین وای‌فای که با درخواست شما ضبط می‌کند و حرکت را گزارش می‌دهد.",
         },
     },
 ]

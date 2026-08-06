@@ -125,9 +125,18 @@ REST_FRAMEWORK = {
     "PAGE_SIZE": 50,
 }
 
+# The access token is what signs every device command from the browser, so it
+# has to be readable by JavaScript; the refresh token is the one kept in an
+# httpOnly cookie. The frontend trades the access token in a couple of minutes
+# before it lapses, and once the refresh token itself expires the user signs in
+# again. Keep REFRESH_COOKIE_MAX_AGE_DAYS in the frontend's .env equal to
+# REFRESH_TOKEN_LIFETIME_DAYS here.
+ACCESS_TOKEN_LIFETIME_MINUTES = env.int("ACCESS_TOKEN_LIFETIME_MINUTES", default=60 * 24)
+REFRESH_TOKEN_LIFETIME_DAYS = env.int("REFRESH_TOKEN_LIFETIME_DAYS", default=7)
+
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=14),
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=ACCESS_TOKEN_LIFETIME_MINUTES),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=REFRESH_TOKEN_LIFETIME_DAYS),
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": False,
     "AUTH_HEADER_TYPES": ("Bearer",),

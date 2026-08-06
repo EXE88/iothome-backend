@@ -1,7 +1,7 @@
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from rest_framework import generics, status
-from rest_framework.permissions import IsAdminUser, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -69,8 +69,16 @@ class GadgetCommandsView(OwnedGadgetMixin, generics.ListAPIView):
 
 
 class GadgetTypeListView(generics.ListAPIView):
+    """The capability contract for every device type.
+
+    Public, because it is the catalogue's technical half: the shop's product
+    pages list what a device reports and what it accepts, and they are read by
+    people who have not signed up yet. Nothing here is per-unit or secret —
+    it is the same information printed on a box.
+    """
+
     serializer_class = GadgetTypeSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     queryset = GadgetType.objects.prefetch_related("capabilities").all()
 
 

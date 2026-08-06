@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Order, Payment, Product
+from .models import Order, OrderItem, Payment, Product
 
 
 class ProductSerializer(serializers.ModelSerializer):
@@ -13,8 +13,10 @@ class ProductSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "name",
+            "name_fa",
             "slug",
             "description",
+            "description_fa",
             "image_url",
             "price",
             "stock",
@@ -41,9 +43,22 @@ class PaymentSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-class OrderSerializer(serializers.ModelSerializer):
+class OrderItemSerializer(serializers.ModelSerializer):
     product = ProductSerializer(read_only=True)
+    line_total = serializers.DecimalField(
+        max_digits=12, decimal_places=0, read_only=True
+    )
+
+    class Meta:
+        model = OrderItem
+        fields = ("product", "quantity", "unit_price", "line_total")
+        read_only_fields = fields
+
+
+class OrderSerializer(serializers.ModelSerializer):
+    items = OrderItemSerializer(many=True, read_only=True)
     payments = PaymentSerializer(many=True, read_only=True)
+    unit_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Order
@@ -51,9 +66,8 @@ class OrderSerializer(serializers.ModelSerializer):
         # never come back out.
         fields = (
             "uid",
-            "product",
-            "quantity",
-            "unit_price",
+            "items",
+            "unit_count",
             "total_amount",
             "receiver_name",
             "receiver_phone",
@@ -67,9 +81,15 @@ class OrderSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-class OrderCreateSerializer(serializers.Serializer):
+class BasketLineSerializer(serializers.Serializer):
     product = serializers.IntegerField()
     quantity = serializers.IntegerField(min_value=1, max_value=10, default=1)
+
+
+class OrderCreateSerializer(serializers.Serializer):
+    """The basket, plus where it is going and what network it joins."""
+
+    items = BasketLineSerializer(many=True, allow_empty=False, max_length=20)
 
     wifi_ssid = serializers.CharField(max_length=32)
     wifi_password = serializers.CharField(max_length=63, allow_blank=True)

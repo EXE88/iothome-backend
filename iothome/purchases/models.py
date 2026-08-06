@@ -13,9 +13,16 @@ class Product(models.Model):
     gadget_type = models.ForeignKey(
         "gadgets.GadgetType", on_delete=models.PROTECT, related_name="products"
     )
+    # The catalogue is sold in Persian first and English second, so the copy
+    # is a column rather than a translation layer: a shop owner adds a product
+    # in the admin and writes both, and the storefront picks by locale. An
+    # empty Persian field falls back to the English one rather than blanking
+    # the card.
     name = models.CharField(max_length=255)
+    name_fa = models.CharField(max_length=255, blank=True)
     slug = models.SlugField(max_length=255, unique=True)
     description = models.TextField(blank=True)
+    description_fa = models.TextField(blank=True)
     image_url = models.URLField(blank=True)
     # Toman. Zarinpal works in Rial, so the gateway layer multiplies by 10.
     price = models.DecimalField(
@@ -38,7 +45,14 @@ class Product(models.Model):
 
 
 class Order(models.Model):
-    """A purchase request, including the Wi-Fi details flashed at assembly."""
+    """A basket that has been placed, including the Wi-Fi flashed at assembly.
+
+    One order carries any number of lines (``OrderItem``) and settles as a
+    single payment, because a buyer who put a lamp and a camera in one basket
+    should visit the gateway once. The Wi-Fi and shipping details belong to
+    the order rather than the line: every unit in a basket is going to the
+    same house and onto the same network.
+    """
 
     STATUS_PENDING_PAYMENT = "pending_payment"
     STATUS_PAID = "paid"
@@ -61,10 +75,10 @@ class Order(models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="orders"
     )
-    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="orders")
-    quantity = models.PositiveSmallIntegerField(default=1)
-    # Frozen at checkout so a later price change never rewrites history.
-    unit_price = models.DecimalField(max_digits=12, decimal_places=0)
+    # The sum of its lines, frozen at checkout. Stored rather than computed so
+    # a later price change cannot rewrite what was actually charged, and so
+    # the amount sent to the gateway and the amount verified on the way back
+    # are read from the same column.
     total_amount = models.DecimalField(max_digits=12, decimal_places=0)
 
     # Burned into the firmware, never exposed back through the API.
@@ -93,6 +107,47 @@ class Order(models.Model):
     @property
     def is_payable(self):
         return self.status == self.STATUS_PENDING_PAYMENT
+
+    @property
+    def unit_count(self):
+        """How many physical devices this order becomes."""
+        return sum(item.quantity for item in self.items.all())
+
+    @property
+    def summary(self):
+        """One line for the gateway's description field and the admin list."""
+        return ", ".join(
+            f"{item.product.name} x{item.quantity}" for item in self.items.all()
+        )
+
+
+class OrderItem(models.Model):
+    """One product line inside an order."""
+
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="items")
+    product = models.ForeignKey(
+        Product, on_delete=models.PROTECT, related_name="order_items"
+    )
+    quantity = models.PositiveSmallIntegerField(default=1)
+    # Frozen at checkout so a later price change never rewrites history.
+    unit_price = models.DecimalField(max_digits=12, decimal_places=0)
+
+    class Meta:
+        ordering = ("id",)
+        constraints = [
+            # A basket holds one line per product; adding the same lamp twice
+            # raises its quantity instead of opening a second line.
+            models.UniqueConstraint(
+                fields=["order", "product"], name="one_line_per_product_per_order"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.product.name} x{self.quantity}"
+
+    @property
+    def line_total(self):
+        return self.unit_price * self.quantity
 
 
 class Payment(models.Model):
