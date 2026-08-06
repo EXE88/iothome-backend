@@ -1,4 +1,4 @@
-"""Create the two reference gadget types and their products.
+"""Create the reference gadget types and their products.
 
     python manage.py seed_catalog
 
@@ -39,8 +39,8 @@ CATALOG = [
             },
         ],
         "product": {
-            "name": "IoT Home Thermometer",
-            "slug": "iot-home-thermometer",
+            "name": "SmartLife Thermometer",
+            "slug": "smartlife-thermometer",
             "price": 850000,
             "stock": 50,
             "description": "Wi-Fi temperature and humidity sensor for any room.",
@@ -85,11 +85,53 @@ CATALOG = [
             },
         ],
         "product": {
-            "name": "IoT Home Smart Lamp",
-            "slug": "iot-home-smart-lamp",
+            "name": "SmartLife Smart Lamp",
+            "slug": "smartlife-smart-lamp",
             "price": 1250000,
             "stock": 30,
             "description": "Dimmable Wi-Fi lamp with three colour temperatures.",
+        },
+    },
+    {
+        "slug": "camera",
+        "name": "Security Camera",
+        # Both directions: it answers commands and also reports motion on its
+        # own, without being asked.
+        "mode": GadgetType.MODE_HYBRID,
+        "description": "Records on demand and reports motion as it happens.",
+        "heartbeat_interval_seconds": 60,
+        "capabilities": [
+            {
+                "key": "recording",
+                "label": "Recording",
+                "direction": Capability.DIRECTION_COMMAND,
+                "value_type": Capability.TYPE_BOOL,
+            },
+            {
+                "key": "motion_alerts",
+                "label": "Motion alerts",
+                "direction": Capability.DIRECTION_COMMAND,
+                "value_type": Capability.TYPE_BOOL,
+            },
+            {
+                "key": "recording",
+                "label": "Recording state",
+                "direction": Capability.DIRECTION_TELEMETRY,
+                "value_type": Capability.TYPE_BOOL,
+            },
+            {
+                "key": "motion",
+                "label": "Motion",
+                "direction": Capability.DIRECTION_TELEMETRY,
+                "value_type": Capability.TYPE_BOOL,
+            },
+        ],
+        "product": {
+            "name": "SmartLife Security Camera",
+            "slug": "smartlife-security-camera",
+            "price": 2400000,
+            "stock": 20,
+            "description": "Wi-Fi camera that records on command and flags motion.",
         },
     },
 ]
