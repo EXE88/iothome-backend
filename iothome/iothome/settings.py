@@ -214,6 +214,10 @@ FIELD_ENCRYPTION_KEY = env("FIELD_ENCRYPTION_KEY", default="")
 OTP_CODE_LENGTH = 6
 OTP_TTL_SECONDS = 10 * 60
 OTP_MAX_ATTEMPTS = 5
+# How long an account that never verified its address is kept before it is
+# deleted. Its only effect while it exists is to reserve that address, so this
+# is really "how long we hold the address for someone who walked away".
+UNVERIFIED_ACCOUNT_TTL_DAYS = env.int("UNVERIFIED_ACCOUNT_TTL_DAYS", default=7)
 
 # How far a device/browser clock may drift from ours on a signed frame.
 SIGNATURE_MAX_SKEW_SECONDS = env.int("SIGNATURE_MAX_SKEW_SECONDS", default=60)

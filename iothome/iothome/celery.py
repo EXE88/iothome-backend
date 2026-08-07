@@ -40,4 +40,14 @@ app.conf.beat_schedule = {
         "task": "purchases.tasks.reconcile_unverified_payments",
         "schedule": crontab(minute=17),
     },
+    # Signups that never entered their code. They hold an email address and
+    # nothing else, so they are released rather than kept.
+    "purge-unverified-accounts": {
+        "task": "accounts.tasks.purge_unverified_accounts",
+        "schedule": crontab(hour=4, minute=20),
+    },
+    "purge-expired-otps": {
+        "task": "accounts.tasks.purge_expired_otps",
+        "schedule": crontab(hour=4, minute=30),
+    },
 }

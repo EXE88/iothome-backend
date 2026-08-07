@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import generics, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -19,6 +20,7 @@ from .serializers import (
     UserSerializer,
     VerifyEmailSerializer,
 )
+from .validators import normalize_email, validate_gmail_address
 
 User = get_user_model()
 
@@ -36,6 +38,32 @@ class RegisterView(generics.CreateAPIView):
     throttle_scope = "otp"
 
     def create(self, request, *args, **kwargs):
+        # Someone coming back to an address they signed up with and never
+        # verified. Refusing them with "already registered" is a dead end:
+        # they cannot register, and they cannot log in either, because login
+        # is gated on the verification they never finished. So the address
+        # stays theirs, a fresh code goes out, and they are pointed at the
+        # screen that actually unblocks them.
+        #
+        # No password is set here on purpose. Letting an unauthenticated
+        # request overwrite the password of an existing account — even an
+        # unverified one — would be a takeover of any signup someone else had
+        # started. Whoever owns the mailbox can use "forgot password", which
+        # also marks the address verified.
+        pending = self.pending_account(request.data.get("email"))
+        if pending is not None:
+            _, code = EmailOTP.issue(pending, EmailOTP.PURPOSE_VERIFY)
+            send_otp_email(pending, EmailOTP.PURPOSE_VERIFY, code)
+            return Response(
+                {
+                    "user": UserSerializer(pending).data,
+                    "detail": "This address is already waiting to be verified. "
+                    "A new code is on its way.",
+                    "code": "verification_pending",
+                },
+                status=status.HTTP_200_OK,
+            )
+
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
@@ -43,9 +71,24 @@ class RegisterView(generics.CreateAPIView):
             {
                 "user": UserSerializer(user).data,
                 "detail": "Account created. Check your email for the code.",
+                "code": "verification_sent",
             },
             status=status.HTTP_201_CREATED,
         )
+
+    @staticmethod
+    def pending_account(raw_email):
+        """An existing account for this address that never got verified."""
+        if not isinstance(raw_email, str) or not raw_email:
+            return None
+        try:
+            validate_gmail_address(raw_email)
+        except DjangoValidationError:
+            # Not an address we would accept anyway; let the serializer say so.
+            return None
+        return User.objects.filter(
+            email=normalize_email(raw_email), is_email_verified=False, is_active=True
+        ).first()
 
 
 class VerifyEmailView(APIView):

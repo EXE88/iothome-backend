@@ -1,16 +1,58 @@
-# IoT Home — backend
+<div align="center">
 
-Django + DRF for the REST side, Channels for the live side, Redis for presence
-and the channel layer, Celery for the periodic sweeps, Zarinpal for payments.
+# 🏠 SmartLife — Backend
 
-```
-accounts/   custom email-based user, OTP verification, JWT
-purchases/  catalogue, orders, Zarinpal, gadget provisioning
-gadgets/    device model + capabilities, WebSocket consumers, presence, tasks
-core/       encryption, HMAC helpers, shared permissions
-```
+**The API, the device network and the shop behind a smart home with no setup step.**
 
-## Running it
+Django + DRF for REST, Channels for the live socket, Redis for presence,
+Celery for the sweeps, Zarinpal for payments — and a signed binary-free
+protocol that real ESP32 firmware can speak.
+
+[![Django](https://img.shields.io/badge/Django-6.0-092E20?logo=django&logoColor=white)](https://www.djangoproject.com)
+[![DRF](https://img.shields.io/badge/DRF-3.17-A30000?logo=django&logoColor=white)](https://www.django-rest-framework.org)
+[![Channels](https://img.shields.io/badge/Channels-4.3-092E20?logo=django&logoColor=white)](https://channels.readthedocs.io)
+[![Celery](https://img.shields.io/badge/Celery-5.6-37814A?logo=celery&logoColor=white)](https://docs.celeryq.dev)
+[![Redis](https://img.shields.io/badge/Redis-8-DC382D?logo=redis&logoColor=white)](https://redis.io)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org)
+
+[![Tests](https://img.shields.io/badge/tests-131%20passing-2b8a3e)](#-checks)
+[![Auth](https://img.shields.io/badge/auth-JWT%20%2B%20per--command%20HMAC-c2255c)](#-signature-scheme)
+[![Encryption](https://img.shields.io/badge/secrets-Fernet%20at%20rest-6741d9)](#-notes)
+[![Payments](https://img.shields.io/badge/payments-Zarinpal-0b7285)](#-the-three-flows)
+
+</div>
+
+---
+
+## 📑 Contents
+
+- [The apps](#-the-apps)
+- [Running it](#-running-it)
+- [Background jobs](#-background-jobs)
+- [The three flows](#-the-three-flows)
+- [Signature scheme](#-signature-scheme)
+- [Message types](#-message-types)
+- [Capabilities](#-capabilities)
+- [Presence and offline detection](#-presence-and-offline-detection)
+- [What gets stored, and what does not](#-what-gets-stored-and-what-does-not)
+- [Deploying](#-deploying)
+- [Notes](#-notes)
+- [Still to do](#-still-to-do)
+
+---
+
+## 🧱 The apps
+
+| Package | Responsibility |
+|---|---|
+| `accounts/` | Gmail-only user, emailed OTP verification, JWT with server-side logout |
+| `purchases/` | Catalogue, multi-item orders, Zarinpal, gadget provisioning |
+| `gadgets/` | Device model + capability contract, WebSocket consumers, presence |
+| `core/` | Fernet encryption, HMAC helpers, shared permissions |
+| `simulators/` | A standalone fake ESP32 — no Django import, runs anywhere |
+
+
+## 🚀 Running it
 
 Redis and Postgres run in containers; Django runs on the host so you keep the
 debugger and auto-reload. On Windows that means WSL2 + Docker Desktop:
@@ -132,7 +174,9 @@ cd D:\PythonFiles\iothome\backend\iothome && ..\env\Scripts\python.exe -m celery
 cd D:\PythonFiles\iothome\backend\iothome && ..\env\Scripts\python.exe -m celery -A iothome beat -l info
 ```
 
-Two things only happen if these are running:
+Full reference — what each job does, and how to switch one off — is in
+[Background jobs](#-background-jobs) below. In short, two things only happen
+if these are running:
 
 - A device that dies *without* closing its socket — power cut, cable pulled —
   is only noticed by the sweeper. Ctrl+C on a simulator is a clean disconnect
@@ -293,7 +337,84 @@ cd D:\PythonFiles\iothome\backend && docker compose down
 `down` keeps the data. `down -v` deletes the volumes, which means re-running
 `migrate`, `seed_catalog` and `createsuperuser`.
 
-## Deploying
+## ⏱ Background jobs
+
+Everything periodic runs on Celery. Nothing here is decoration: each one exists
+because some state can otherwise get stuck, and the column that matters is
+**"if it never runs"**.
+
+Start the two processes:
+
+```bash
+cd D:\PythonFiles\iothome\backend\iothome && ..\env\Scripts\python.exe -m celery -A iothome worker -l info -P solo
+```
+
+```bash
+cd D:\PythonFiles\iothome\backend\iothome && ..\env\Scripts\python.exe -m celery -A iothome beat -l info
+```
+
+`-P solo` is for Windows only; use the default pool (or `-c N`) on Linux.
+The **worker** executes jobs, the **beat** decides when. You need both.
+
+### The schedule
+
+| Task | Runs | What it does | If it never runs |
+|---|---|---|---|
+| `gadgets.sweep_offline_devices` | 30s | Marks devices offline once they stop heartbeating past their type's timeout, closes the socket, tells the owner | A device that dies *without* closing its socket — power cut, cable pulled — stays "online" for ever. A clean Ctrl+C is still detected instantly |
+| `gadgets.expire_stale_commands` | 60s | Closes out commands the device never acknowledged | A command whose per-command timer was lost sits `pending` for ever and its control stays stuck mid-flight |
+| `gadgets.reconcile_last_seen` | 5 min | Copies Redis heartbeats into `Gadget.last_seen_at` | "Last seen" goes stale in the UI. Nothing live breaks — Redis is the live truth |
+| `purchases.expire_stale_orders` | 5 min | Releases stock from checkouts abandoned past `PENDING_ORDER_TIMEOUT_MINUTES` — **after asking the gateway whether they were actually paid** | 🔴 Stock is reserved at checkout, so every closed gateway tab holds its units for ever and the shop slowly sells out of nothing |
+| `purchases.reconcile_unverified_payments` | hourly | Asks Zarinpal for money it took that we never confirmed, and turns those into real orders | 🔴 A lost callback means the buyer paid and has no order. Zarinpal reverses it after 72h, so it self-heals financially — but silently, and the customer is left with neither |
+| `accounts.purge_unverified_accounts` | daily 04:20 | Deletes signups that never entered their emailed code, after `UNVERIFIED_ACCOUNT_TTL_DAYS` | Abandoned rows accumulate, each holding an email address nobody can re-register |
+| `accounts.purge_expired_otps` | daily 04:30 | Drops codes that can no longer be used | One dead row per signup, resend and reset, kept for the life of the system |
+| `gadgets.prune_old_commands` | daily 04:00 | Drops command history past 90 days | Command history grows without bound |
+
+`gadgets.expire_command` is the odd one out: it is **not** on the schedule. It
+is queued with a countdown the moment a command is sent, and
+`expire_stale_commands` is its backstop for when the broker loses it.
+
+### Turning one off
+
+The defaults above live in `iothome/celery.py`, but the live schedule is stored
+in the database by `django-celery-beat`. So:
+
+- **Permanently, in code** — comment the entry out of `beat_schedule` in
+  `iothome/celery.py`, then delete its row under
+  **Admin → Periodic Tasks**, because entries already written to the database
+  are not removed by editing the file.
+- **Temporarily, without a deploy** — **Admin → Periodic Tasks**, untick
+  *Enabled*. Takes effect on the beat's next tick.
+- **Change how often** — same screen: edit the interval or crontab. Preferred
+  over editing the file, since the database is what beat actually reads.
+- **Everything at once** — stop the beat process. The worker stays up, so
+  commands still get their individual `expire_command` countdown.
+
+### Running one by hand
+
+Useful when debugging, and the only way to run them at all if you are not
+running Celery:
+
+```bash
+cd D:\PythonFiles\iothome\backend\iothome && ..\env\Scripts\python.exe manage.py shell -c "from purchases.tasks import expire_stale_orders; print(expire_stale_orders())"
+```
+
+Every task is a plain function. Calling it directly runs it in-process,
+synchronously, with no broker involved. `expire_stale_orders`,
+`reconcile_unverified_payments`, `purge_unverified_accounts` and
+`purge_expired_otps` all return a count of what they touched.
+
+### Tuning
+
+| Setting | Default | Governs |
+|---|---|---|
+| `PENDING_ORDER_TIMEOUT_MINUTES` | 30 | How long an unpaid order holds its stock. Keep it well clear of a real checkout — the sweep cannot tell an abandoned tab from someone still typing a card number |
+| `UNVERIFIED_ACCOUNT_TTL_DAYS` | 7 | How long an unverified signup keeps its email address |
+| `COMMAND_TIMEOUT_SECONDS` | 15 | How long a command waits for the device's ack |
+| `DEFAULT_OFFLINE_TIMEOUT_SECONDS` | 180 | Fallback offline threshold for types that do not set their own |
+
+---
+
+## 🌐 Deploying
 
 `Dockerfile` builds one image that runs all three processes; `web` serves ASGI
 with Daphne, and `worker`/`beat` run Celery from the same image. Daphne is
@@ -313,7 +434,7 @@ Before the first real deploy: set `DEBUG=False`, a fresh `SECRET_KEY`, real
 and Wi-Fi password is unrecoverable. `python manage.py check --deploy` should
 come back clean.
 
-## The three flows
+## 🔄 The three flows
 
 **1. Buying.** `POST /api/purchases/checkout/` takes an `items` list — the
 basket, one line per product — plus the shipping details and the buyer's Wi-Fi
@@ -352,6 +473,26 @@ payment wins: the order is reinstated and the stock is taken back off the
 shelf. If someone else bought the last unit in between, that is logged as an
 error naming the order, because only a human can resolve it.
 
+**Abandoned signups.** The user row has to exist before the address is proven —
+the code has to be sent to somebody — so accounts that never verify are a
+permanent fact of the system, not an edge case. An unverified account can do
+nothing at all: it cannot log in, and every endpoint that matters sits behind
+`IsEmailVerified`. Its only real effect is to reserve an email address.
+
+That made it a trap. Coming back and signing up again answered "already
+registered", and logging in answered "not verified" — so the address was
+unusable by the only person entitled to it. Now registering an address that is
+already waiting to be verified **re-sends the code** and returns 200 with
+`code: verification_pending`, pointing the browser at the verify screen. It
+never sets a password, because letting an unauthenticated request overwrite the
+password of an existing account would be a takeover of any signup somebody else
+had started; whoever owns the mailbox can use "forgot password", which also
+marks the address verified.
+
+`purge_unverified_accounts` then deletes anything still unverified after
+`UNVERIFIED_ACCOUNT_TTL_DAYS`, releasing the address. Accounts with an order or
+a gadget attached are skipped regardless of the flag.
+
 **Sessions.** Access tokens last a day, refresh tokens seven, and rotation is
 **off** — so the seven days are absolute rather than sliding, and a user who
 signed in a week ago signs in again. `POST /api/auth/logout/` blacklists the
@@ -379,7 +520,7 @@ boot it joins Wi-Fi and opens `ws://host/ws/device/<uid>/`, then proves itself
 telemetry and status changes for every gadget it owns, and signs each command
 individually.
 
-## Signature scheme
+## 🔐 Signature scheme
 
 Every signed frame carries `timestamp`, `nonce` and `signature`.
 
@@ -407,7 +548,7 @@ above `WS_MAX_FRAMES_PER_MINUTE`.
 firmware: it performs this handshake, holds its own state, and answers
 `state_request`.
 
-## Message types
+## 📨 Message types
 
 Device → server: `auth`, `heartbeat`, `telemetry`, `command_result`.
 Server → device: `auth.ok`, `command`, `state_request`, `error`.
@@ -419,7 +560,7 @@ Server → user: `auth.ok`, `telemetry`, `device.status`, `command.status`,
 includes every gadget it owns with a live `online` flag. Full payload shapes
 are in `gadgets/protocol.py`.
 
-## Capabilities
+## 🧩 Capabilities
 
 A `GadgetType` owns a list of `Capability` rows — one per readable value
 (`direction=telemetry`) or accepted command (`direction=command`), each with a
@@ -432,7 +573,7 @@ contract from `GET /api/gadgets/types/` to know how to render controls.
 Two shapes are covered: types that stream (`mode=telemetry`, e.g. thermometer)
 and types that only answer (`mode=action`, e.g. lamp). Both heartbeat.
 
-## Presence and offline detection
+## 📡 Presence and offline detection
 
 A connected device is registered in Redis (`devices:online` plus
 `device:online:<uid>`) with its own timeout, taken from its type's heartbeat
@@ -445,7 +586,7 @@ carries its own TTL, so a worker dying mid-connection cannot leave a ghost.
 Commands that go unanswered for `COMMAND_TIMEOUT_SECONDS` are closed out by
 `expire_command`, with `expire_stale_commands` as the backstop.
 
-## What gets stored, and what does not
+## 💾 What gets stored, and what does not
 
 **Commands are stored** — the command, who issued it, and the device's answer.
 They are human-initiated, so the volume is small, and this is the trail that
@@ -489,7 +630,7 @@ show for them.
 Firmware must implement `state_request` — a device that ignores it will look
 blank on a freshly opened dashboard until its next telemetry frame.
 
-## Notes
+## 📝 Notes
 
 - Device secret keys and Wi-Fi passwords are Fernet-encrypted at rest
   (`FIELD_ENCRYPTION_KEY`). Lose that key and they are unrecoverable; changing
@@ -505,7 +646,7 @@ blank on a freshly opened dashboard until its next telemetry frame.
   core layer parks on a `BRPOP` that redis-py 8 aborts on its socket timeout,
   which drops idle device sockets with a 1011 after a few seconds.
 
-## Still to do
+## 🚧 Still to do
 
 - Serve behind TLS: `wss://` and a `Secure` cookie posture. The reverse proxy
   should also do the canonical-host redirect, which the app currently only
@@ -514,5 +655,7 @@ blank on a freshly opened dashboard until its next telemetry frame.
   `SIGNATURE_MAX_SKEW_SECONDS`, and a phone with a wrong clock fails with an
   unhelpful `auth_failed`.
 - An OpenAPI schema; a mobile client would want one.
+- Rate-limit the register endpoint per address, not just per IP. It is throttled
+  at the `otp` scope, but a resend loop against one mailbox is still cheap.
 - Order status has no way to move past `paid` except the admin — no
   fulfilment flow, and `tracking_code` is entered by hand.
