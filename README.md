@@ -226,9 +226,31 @@ itself. With a machine address of `100.126.109.83`:
 
 3. Restart both servers so they re-read their `.env`.
 
-Over plain http the browser has no `crypto.subtle`, so command signing falls
-back to the bundled HMAC in `front/src/lib/hmac.ts`. It is verified against
-Node's crypto and produces identical signatures — slower, not different.
+### Serving over plain http
+
+Anything that is not https and not localhost is an **insecure context**, and
+browsers withhold part of the Web Crypto API there. A VPS reached at
+`http://<public-ip>` is the usual case, and it is the usual case for this to
+be discovered late, because development happens on localhost where everything
+is present.
+
+Two APIs are affected and both have fallbacks in `front/src/lib/hmac.ts`:
+`crypto.subtle`, which signs the socket handshake and every command, and
+`crypto.randomUUID`, which mints the `request_id` pairing a command with its
+answer. The fallbacks are built on `crypto.getRandomValues`, which carries no
+such restriction. They are slower, not different — signatures are verified
+byte-for-byte against Node's crypto.
+
+Never call either API directly; use `hmacHex` and `randomUUID` from that
+module. To check the whole path a bare-IP deployment takes:
+
+```bash
+cd D:\PythonFiles\iothome\front && npm run e2e:insecure
+```
+
+It strips both APIs before the app loads and then presses real controls
+against the real backend. Put the site behind TLS for anything real — this
+keeps a plain-http staging box working, it is not a substitute for https.
 
 ### When something is wrong
 
